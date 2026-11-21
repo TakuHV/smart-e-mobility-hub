@@ -1,0 +1,24 @@
+{
+  "operatingHours": { "open": "05:00", "close": "23:00" },
+  "booking": { "pickupHoldMinutes": 15, "minimumBatteryToBookPercent": 20 },
+  "parking": { "arrivalGraceMinutes": 15, "reminderBeforeEndMinutes": 10, "overstayGraceMinutes": 15, "sharedReturnReservePercent": 10 },
+  "charging": {
+    "targetBatteryPercent": 90,
+    "personalRequestsPerVehiclePerDay": 2,
+    "personalConnectWindowMinutes": 15,
+    "schedulerIntervalMinutes": null,
+    "demoEstimatedSessionMinutes": 45,
+    "schedulerWeights": { "batteryLevel": 1, "nextRequiredUsageTime": 1, "waitingDuration": 1, "hubPowerLimit": 1 },
+    "demoAssumptions": {
+      "weightsAreApproved": false,
+      "estimatedSessionMinutes": 45,
+      "note": "Equal weights and a 45-minute estimation window are illustrative MVP defaults only. Group approval is still required by BR-21 and the estimate is not a guarantee. The Hub Power Limit is seeded per Hub as demo data. No replacement threshold or maximum session duration is assumed."
+    }
+  },
+  "status": { "staleAfterMinutes": 2, "refreshIntervalSeconds": 60 },
+  "demoData": {
+    "note": "Seed values for the classroom demonstration; they are not approved project operating parameters unless separately confirmed by the group.",
+    "seedHubPowerLimitKw": 30,
+    "seedChargerPowerKw": 7.2
+  }
+}
