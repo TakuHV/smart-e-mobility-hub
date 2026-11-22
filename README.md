@@ -144,6 +144,9 @@ smart-e-mobility-hub/
 │   └── test/
 ├── data/
 │   └── configuration.json
+├── docs/
+│   ├── Submission1_v7.pdf
+│   └── Technical_Design_Document.pdf
 ├── package.json
 └── README.md
 ```
