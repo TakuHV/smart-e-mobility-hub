@@ -29,6 +29,28 @@ export function isStudentSuspended(userId) {
   return result.total >= 5;
 }
 
+// --- CHÈN THÊM ĐOẠN NÀY --- SỬA LẠI SAU ---
+export function getViolationSummary(userId) {
+  if (!userId) {
+    return { total: 0, activePoints: 0, totalPoints: 0, threshold: 5, isSuspended: false, suspended: false, activeCount: 0, violations: [] };
+  }
+  const violations = db.prepare(`SELECT * FROM violations
+    WHERE user_id=? AND status IN ('Recorded','Upheld') AND expires_at > ?
+    ORDER BY recorded_at DESC`).all(userId, nowIso());
+  const total = violations.reduce((sum, item) => sum + (item.points || 0), 0);
+  const isSuspended = total >= 5;
+  return {
+    total,
+    activePoints: total,
+    totalPoints: total,
+    threshold: 5,
+    isSuspended,
+    suspended: isSuspended,
+    activeCount: violations.length,
+    violations
+  };
+}
+
 export function inHubOperatingHours(hub, start, end = start) {
   if (!hub) return false;
   const fmt = (value) => new Intl.DateTimeFormat('en-GB', {

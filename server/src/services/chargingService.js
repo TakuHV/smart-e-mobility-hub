@@ -1,11 +1,37 @@
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 import { db, transaction, makeId, nowIso, projectRoot } from '../database/db.js';
-import { HttpError, requireValue, isStudentSuspended, auditChange, addViolation, inHubOperatingHours } from './commonService.js';
+import { requireValue, isStudentSuspended, auditChange, addViolation, inHubOperatingHours } from './commonService.js';
 
 const config = JSON.parse(readFileSync(resolve(projectRoot, 'data/configuration.json'), 'utf8'));
 const CHARGE_TARGET = config.charging.targetBatteryPercent;
 const CONNECT_MINUTES = config.charging.personalConnectWindowMinutes;
+
+/*
+ * Scheduler parameters.
+ * Source: Technical Design Document, sections 2.2 and 2.3. All of these are PROPOSED VALUES,
+ * not approved requirements. They can be overridden in data/configuration.json under
+ * "charging.scheduler"; the defaults below apply when a key is missing.
+ */
+const S = config.charging.scheduler ?? {};
+const SCHED = {
+  weights: { need: 0.5, urgency: 0.3, waiting: 0.2, ...S.weights },
+  classH: { batteryBelowPercent: 10, usageWithinMinutes: 60, ...S.classH },
+  urgencyHorizonMinutes: S.urgencyHorizonMinutes ?? 240,
+  waitingDivisorMinutes: S.waitingDivisorMinutes ?? 3,
+  // Demo assumption used only to show approximate queue times (BR-43: an estimate, not a guarantee).
+  estimatedSessionMinutes: S.estimatedSessionMinutes ?? config.charging.demoAssumptions?.estimatedSessionMinutes ?? 45
+};
+
+// Demo switch for NI-02: when the simulated feed is paused, hub data stops being refreshed and becomes Stale.
+let simulatedSensorFeedEnabled = true;
+export function setSimulatedSensorFeed(enabled) {
+  simulatedSensorFeedEnabled = Boolean(enabled);
+  return simulatedSensorFeedEnabled;
+}
+
+// Thrown inside a transaction to roll it back when a row was changed by someone else.
+class SchedulerSkip extends Error {}
 
 function localDayRange() {
   const parts = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date());
@@ -17,11 +43,13 @@ function localDayRange() {
 export function enqueueSharedVehicle(vehicleId, hubId) {
   const active = db.prepare(`SELECT id FROM charging_requests WHERE vehicle_id=? AND status IN ('Queued','Assigned','Charging')`).get(vehicleId);
   if (active) return active.id;
-  const vehicle = db.prepare('SELECT * FROM vehicles WHERE id=? AND kind=\'shared\'').get(vehicleId);
+  const vehicle = db.prepare(`SELECT * FROM vehicles WHERE id=? AND kind='shared'`).get(vehicleId);
   if (!vehicle) return null;
   const now = nowIso();
   const requestId = makeId('charge');
-  const nextUse = vehicle.next_required_usage_at || new Date(Date.now() + 4 * 3600000).toISOString();
+  // OD-2: if the Operator has not entered a Next Required Usage Time, it stays NULL (urgency = 0).
+  // No value is invented here. If charging_requests.next_required_usage_at is NOT NULL in schema.sql, make it nullable.
+  const nextUse = vehicle.next_required_usage_at || null;
   db.prepare(`INSERT INTO charging_requests
     (id, user_id, vehicle_id, hub_id, request_type, status, battery_level, next_required_usage_at,
      registered_at, estimated_start_at, created_at)
@@ -31,54 +59,95 @@ export function enqueueSharedVehicle(vehicleId, hubId) {
   return requestId;
 }
 
-function calculatePriority(request, nowMs, availablePowerRatio) {
-  const weights = config.charging.schedulerWeights;
-  const battery = Math.max(0, Math.min(1, (100 - Number(request.battery_level)) / 100));
-  const hoursToRequiredUse = (new Date(request.next_required_usage_at).getTime() - nowMs) / 3600000;
-  const nextUseUrgency = Math.max(0, Math.min(1, (12 - hoursToRequiredUse) / 12)); // demo normalization horizon
-  const waitingMinutes = Math.max(0, (nowMs - new Date(request.registered_at).getTime()) / 60000);
-  const waiting = Math.max(0, Math.min(1, waitingMinutes / 120)); // demo normalization horizon
-  const powerHeadroom = Math.max(0, Math.min(1, availablePowerRatio));
-  const totalWeight = weights.batteryLevel + weights.nextRequiredUsageTime + weights.waitingDuration + weights.hubPowerLimit;
-  const score = (battery * weights.batteryLevel
-    + nextUseUrgency * weights.nextRequiredUsageTime
-    + waiting * weights.waitingDuration
-    + powerHeadroom * weights.hubPowerLimit) / totalWeight;
-  return { score, components: { battery, nextUseUrgency, waiting, powerHeadroom } };
+/*
+ * Priority of one queued request (Technical Design Document 2.2).
+ * The Hub Power Limit is NOT a ranking criterion: it limits capacity in runScheduler().
+ *   need    = 100 - battery level
+ *   urgency = 100 * max(0, 1 - minutesUntilNextUse / horizon); 0 when the time is unknown (OD-2)
+ *   waiting = min(100, minutesWaited / divisor)
+ *   class H = battery below threshold, or next use within the window while battery is below the target
+ */
+export function calculatePriority(request, nowMs = Date.now()) {
+  const battery = Number(request.battery_level);
+  const hasUsageTime = Boolean(request.next_required_usage_at);
+  const minutesToUse = hasUsageTime ? (Date.parse(request.next_required_usage_at) - nowMs) / 60000 : null;
+  const minutesWaited = Math.max(0, (nowMs - Date.parse(request.registered_at)) / 60000);
+
+  const need = 100 - battery;
+  const urgency = hasUsageTime
+    ? 100 * Math.min(1, Math.max(0, 1 - Math.max(0, minutesToUse) / SCHED.urgencyHorizonMinutes))
+    : 0;
+  const waiting = Math.min(100, minutesWaited / SCHED.waitingDivisorMinutes);
+  const w = SCHED.weights;
+  const score = w.need * need + w.urgency * urgency + w.waiting * waiting;
+
+  const isClassH = battery < SCHED.classH.batteryBelowPercent
+    || (hasUsageTime && minutesToUse <= SCHED.classH.usageWithinMinutes && battery < CHARGE_TARGET);
+  return { cls: isClassH ? 'H' : 'L', score, components: { need, urgency, waiting } };
 }
 
-function estimateQueueTimes(hubId) {
-  const hub = db.prepare('SELECT * FROM hubs WHERE id=?').get(hubId);
-  if (!hub) return;
-  const queued = db.prepare(`SELECT * FROM charging_requests WHERE hub_id=? AND status='Queued' ORDER BY registered_at`).all(hubId);
-  const busy = db.prepare(`SELECT c.*, r.charging_started_at FROM chargers c
-    LEFT JOIN charging_requests r ON r.charger_id=c.id AND r.status='Charging'
-    WHERE c.hub_id=? AND c.status IN ('Assigned','Charging','Awaiting Removal') ORDER BY c.code`).all(hubId);
-  const demoSessionMinutes = Number(config.charging.demoAssumptions.estimatedSessionMinutes || 45);
-  const base = Date.now() + busy.filter(x => x.status === 'Awaiting Removal').length * 5 * 60000;
-  queued.forEach((request, index) => {
-    const estimated = new Date(base + (index + 1) * demoSessionMinutes * 60000).toISOString();
-    db.prepare('UPDATE charging_requests SET estimated_start_at=? WHERE id=?').run(estimated, request.id);
+// Class H first, then by score (high to low).
+// OD-2/OD-1: the last key is a deterministic TECHNICAL tie-break (vehicle id), not a business rule and not arrival order.
+function compareRanked(a, b) {
+  if (a.cls !== b.cls) return a.cls === 'H' ? -1 : 1;
+  if (b.score !== a.score) return b.score - a.score;
+  return String(a.vehicle_id).localeCompare(String(b.vehicle_id));
+}
+
+// One ranking used by BOTH the scheduler and the queue-time estimate.
+export function rankQueue(hubId, nowMs = Date.now()) {
+  const queue = db.prepare(`SELECT r.*, v.connector_type, v.plate, v.kind, v.status AS vehicle_status
+    FROM charging_requests r JOIN vehicles v ON v.id=r.vehicle_id
+    WHERE r.hub_id=? AND r.status='Queued'`).all(hubId);
+  return queue.map(r => ({ ...r, ...calculatePriority(r, nowMs) })).sort(compareRanked);
+}
+
+/*
+ * Estimated start time (BR-43): follows the same ranking as the scheduler. Each charger becomes free when its running
+ * session is expected to end; each ranked request takes the earliest compatible charger.
+ * Simplification: the Hub Power Limit is not simulated into the future. This is an estimate, not a guarantee.
+ */
+function estimateQueueTimes(hubId, nowMs = Date.now()) {
+  const ranked = rankQueue(hubId, nowMs);
+  if (!ranked.length) return;
+  const sessionMs = SCHED.estimatedSessionMinutes * 60000;
+  const rows = db.prepare(`SELECT c.*, r.charging_started_at, r.assigned_at
+    FROM chargers c
+    LEFT JOIN charging_requests r ON r.charger_id=c.id AND r.status IN ('Assigned','Charging')
+    WHERE c.hub_id=? AND c.status IN ('Available','Assigned','Charging','Awaiting Removal')`).all(hubId);
+  const chargers = rows.map(c => {
+    let freeAt = nowMs;
+    if (c.status === 'Awaiting Removal') freeAt = nowMs + 5 * 60000;
+    else if (c.status === 'Charging' && c.charging_started_at) freeAt = Date.parse(c.charging_started_at) + sessionMs;
+    else if (c.status === 'Assigned' && c.assigned_at) freeAt = Date.parse(c.assigned_at) + sessionMs;
+    return { connectors: JSON.parse(c.connector_types_json), freeAt: Math.max(nowMs, freeAt) };
   });
+  const update = db.prepare('UPDATE charging_requests SET estimated_start_at=? WHERE id=?');
+  for (const request of ranked) {
+    const candidates = chargers.filter(c => c.connectors.includes(request.connector_type));
+    if (!candidates.length) continue;
+    const next = candidates.reduce((best, c) => (c.freeAt < best.freeAt ? c : best));
+    update.run(new Date(next.freeAt).toISOString(), request.id);
+    next.freeAt += sessionMs;
+  }
 }
 
 export function runScheduler(hubId = null, responsibleUser = 'system') {
-  const hubs = hubId ? [db.prepare('SELECT * FROM hubs WHERE id=?').get(hubId)].filter(Boolean) : db.prepare('SELECT * FROM hubs').all();
+  const nowMs = Date.now();
+  const hubs = hubId
+    ? [db.prepare('SELECT * FROM hubs WHERE id=?').get(hubId)].filter(Boolean)
+    : db.prepare('SELECT * FROM hubs').all();
   const assigned = [];
   for (const hub of hubs) {
     const activePowerRow = db.prepare(`SELECT COALESCE(SUM(c.power_kw),0) AS kw FROM chargers c
       WHERE c.hub_id=? AND c.status IN ('Assigned','Charging')`).get(hub.id);
     let activePower = Number(activePowerRow.kw || 0);
+    // Charger choice is deterministic (lowest power, then code); the documents do not define it.
     const freeChargers = db.prepare(`SELECT * FROM chargers WHERE hub_id=? AND status='Available' ORDER BY power_kw, code`).all(hub.id);
-    const queue = db.prepare(`SELECT r.*, v.connector_type, v.plate, v.kind, v.status AS vehicle_status
-      FROM charging_requests r JOIN vehicles v ON v.id=r.vehicle_id
-      WHERE r.hub_id=? AND r.status='Queued' ORDER BY r.registered_at`).all(hub.id);
-    const nowMs = Date.now();
-    const powerRatio = hub.power_limit_kw > 0 ? Math.max(0, (hub.power_limit_kw - activePower) / hub.power_limit_kw) : 0;
-    const ranked = queue.map(r => ({ ...r, ...calculatePriority(r, nowMs, powerRatio) }))
-      .sort((a, b) => b.score - a.score || a.registered_at.localeCompare(b.registered_at));
 
-    for (const request of ranked) {
+    for (const request of rankQueue(hub.id, nowMs)) {
+      if (!freeChargers.length) break;
+      // Capacity: the sum of the power of active chargers must stay within the Hub Power Limit.
       const chargerIndex = freeChargers.findIndex(charger =>
         JSON.parse(charger.connector_types_json).includes(request.connector_type)
         && activePower + charger.power_kw <= hub.power_limit_kw + 1e-6);
@@ -87,25 +156,33 @@ export function runScheduler(hubId = null, responsibleUser = 'system') {
       const now = nowIso();
       const deadline = request.request_type === 'personal'
         ? new Date(Date.now() + CONNECT_MINUTES * 60000).toISOString() : null;
-      transaction(() => {
-        db.prepare(`UPDATE chargers SET status='Assigned', current_vehicle_id=?, updated_at=? WHERE id=? AND status='Available'`)
-          .run(request.vehicle_id, now, charger.id);
-        db.prepare(`UPDATE charging_requests SET status='Assigned', charger_id=?, assigned_at=?, connect_deadline=?, priority_score=? WHERE id=? AND status='Queued'`)
-          .run(charger.id, now, deadline, request.score, request.id);
-        if (request.kind === 'shared') {
-          const moveId = makeId('move');
-          db.prepare(`INSERT INTO move_vehicle_requests
-            (id,charging_request_id,vehicle_id,charger_id,direction,status,requested_at,note)
-            VALUES (?,?,?,?, 'TO_CHARGER','Requested',?,?)`)
-            .run(moveId, request.id, request.vehicle_id, charger.id, now, 'Field Staff moves the shared vehicle to its assigned charger (BR-46).');
-        }
-        auditChange('ChargingRequest', request.id, 'CHARGER_ASSIGNED',
-          { chargerId: charger.id, priorityScore: request.score, deadline }, responsibleUser);
-      });
+      try {
+        transaction(() => {
+          const requestUpdate = db.prepare(`UPDATE charging_requests
+            SET status='Assigned', charger_id=?, assigned_at=?, connect_deadline=?, priority_score=?
+            WHERE id=? AND status='Queued'`).run(charger.id, now, deadline, request.score, request.id);
+          if (requestUpdate.changes !== 1) throw new SchedulerSkip();
+          const chargerUpdate = db.prepare(`UPDATE chargers SET status='Assigned', current_vehicle_id=?, updated_at=?
+            WHERE id=? AND status='Available'`).run(request.vehicle_id, now, charger.id);
+          if (chargerUpdate.changes !== 1) throw new SchedulerSkip(); // rolls back the request update too
+          if (request.kind === 'shared') {
+            const moveId = makeId('move');
+            db.prepare(`INSERT INTO move_vehicle_requests
+              (id,charging_request_id,vehicle_id,charger_id,direction,status,requested_at,note)
+              VALUES (?,?,?,?, 'TO_CHARGER','Requested',?,?)`)
+              .run(moveId, request.id, request.vehicle_id, charger.id, now, 'Field Staff moves the shared vehicle to its assigned charger (BR-46).');
+          }
+          auditChange('ChargingRequest', request.id, 'CHARGER_ASSIGNED',
+            { chargerId: charger.id, priorityClass: request.cls, priorityScore: request.score, deadline }, responsibleUser);
+        });
+      } catch (error) {
+        if (error instanceof SchedulerSkip) continue; // the row changed meanwhile; nothing was assigned
+        throw error;
+      }
       activePower += charger.power_kw;
       assigned.push({ requestId: request.id, chargerId: charger.id, vehicleId: request.vehicle_id, connectDeadline: deadline });
     }
-    estimateQueueTimes(hub.id);
+    estimateQueueTimes(hub.id, nowMs);
   }
   return { assigned, note: 'Power limit and connector compatibility were enforced for every assignment.' };
 }
@@ -128,22 +205,23 @@ export function createPersonalChargingRequest({ user, vehicleId, hubId, batteryL
   const hasCompatibleCharger = hubChargers.some(charger => JSON.parse(charger.connector_types_json).includes(vehicle.connector_type));
   requireValue(hasCompatibleCharger, 409, 'No compatible charger is configured at this Hub (BR-16 / BR-41).');
   requireValue(vehicle.hub_id === hubId, 400, 'The personal vehicle must be at the selected Hub before registering a request.');
-  requireValue(['Available','Parked','Needs Charging'].includes(vehicle.status), 409, 'The personal vehicle is not currently eligible for a charging request.');
+  requireValue(['Available', 'Parked', 'Needs Charging'].includes(vehicle.status), 409, 'The personal vehicle is not currently eligible for a charging request.');
 
-  const { start, end } = localDayRange();
-  const daily = db.prepare(`SELECT COUNT(*) AS count FROM charging_requests r
-    WHERE r.vehicle_id=? AND r.request_type='personal' AND r.registered_at>=? AND r.registered_at<?`).get(vehicleId, start, end);
-  requireValue(daily.count < config.charging.personalRequestsPerVehiclePerDay, 409,
-    `This vehicle has reached the daily limit of ${config.charging.personalRequestsPerVehiclePerDay} personal charging requests (BR-45).`);
-  const parkingConflict = db.prepare(`SELECT id FROM parking_reservations
-    WHERE vehicle_id=? AND status IN ('Confirmed','In Progress') AND start_at < ? AND end_at > ?`)
-    .get(vehicleId, nextUse.toISOString(), nowIso());
-  requireValue(!parkingConflict, 409, 'The charging period overlaps an active parking reservation for this vehicle (BR-24).');
-  const active = db.prepare(`SELECT id FROM charging_requests WHERE vehicle_id=? AND status IN ('Queued','Assigned','Charging')`).get(vehicleId);
-  requireValue(!active, 409, 'This vehicle already has an active charging request.');
-  const now = nowIso();
   const id = makeId('charge');
+  // The state-dependent checks run inside the same transaction as the insert, so they cannot go stale.
   transaction(() => {
+    const { start, end } = localDayRange();
+    const daily = db.prepare(`SELECT COUNT(*) AS count FROM charging_requests r
+      WHERE r.vehicle_id=? AND r.request_type='personal' AND r.registered_at>=? AND r.registered_at<?`).get(vehicleId, start, end);
+    requireValue(daily.count < config.charging.personalRequestsPerVehiclePerDay, 409,
+      `This vehicle has reached the daily limit of ${config.charging.personalRequestsPerVehiclePerDay} personal charging requests.`);
+    const parkingConflict = db.prepare(`SELECT id FROM parking_reservations
+      WHERE vehicle_id=? AND status IN ('Confirmed','In Progress') AND start_at < ? AND end_at > ?`)
+      .get(vehicleId, nextUse.toISOString(), nowIso());
+    requireValue(!parkingConflict, 409, 'The charging period overlaps an active parking reservation for this vehicle (BR-24).');
+    const active = db.prepare(`SELECT id FROM charging_requests WHERE vehicle_id=? AND status IN ('Queued','Assigned','Charging')`).get(vehicleId);
+    requireValue(!active, 409, 'This vehicle already has an active charging request.');
+    const now = nowIso();
     db.prepare(`INSERT INTO charging_requests
       (id,user_id,vehicle_id,hub_id,request_type,status,battery_level,next_required_usage_at,registered_at,created_at)
       VALUES (?,?,?,?, 'personal','Queued',?,?,?,?)`)
@@ -157,7 +235,7 @@ export function createPersonalChargingRequest({ user, vehicleId, hubId, batteryL
 }
 
 export function listChargingData(user) {
-  const studentFilter = user.role === 'Student' ? 'AND (r.user_id=? OR r.request_type=\'shared_automatic\')' : '';
+  const studentFilter = user.role === 'Student' ? `AND (r.user_id=? OR r.request_type='shared_automatic')` : '';
   const requestSql = `SELECT r.*, v.plate, v.kind, v.connector_type, h.name AS hub_name, c.code AS charger_code
     FROM charging_requests r JOIN vehicles v ON v.id=r.vehicle_id JOIN hubs h ON h.id=r.hub_id
     LEFT JOIN chargers c ON c.id=r.charger_id WHERE 1=1 ${studentFilter}
@@ -170,7 +248,7 @@ export function listChargingData(user) {
   const movesSql = `SELECT m.*, v.plate, c.code AS charger_code, h.name AS hub_name
     FROM move_vehicle_requests m JOIN vehicles v ON v.id=m.vehicle_id
     JOIN chargers c ON c.id=m.charger_id JOIN hubs h ON h.id=c.hub_id
-    ${user.role === 'Student' ? 'WHERE v.owner_id=? OR v.kind="shared"' : ''}
+    ${user.role === 'Student' ? `WHERE v.owner_id=? OR v.kind='shared'` : ''}
     ORDER BY m.requested_at DESC LIMIT 100`;
   const moveRequests = user.role === 'Student' ? db.prepare(movesSql).all(user.id) : db.prepare(movesSql).all();
   return { requests, chargers, moveRequests };
@@ -197,13 +275,14 @@ export function connectPersonalVehicle({ user, requestId }) {
 }
 
 export function completeCharging({ user, requestId, finalBatteryLevel = CHARGE_TARGET }) {
-  requireValue(['Operator','Admin','Student'].includes(user?.role), 403, 'This action is not available for this role.');
+  requireValue(['Operator', 'Admin', 'Student'].includes(user?.role), 403, 'This action is not available for this role.');
   const request = db.prepare(`SELECT r.*, v.owner_id, v.kind, c.status AS charger_status
     FROM charging_requests r JOIN vehicles v ON v.id=r.vehicle_id
     JOIN chargers c ON c.id=r.charger_id WHERE r.id=?`).get(requestId);
   requireValue(request, 404, 'Charging request not found.');
   requireValue(request.status === 'Charging' && request.charger_status === 'Charging', 409, 'Only an active charging session can be completed.');
   requireValue(user.role !== 'Student' || request.owner_id === user.id, 403, 'Only the owner can complete this charging session.');
+  // MVP simplification: the final battery level comes from the caller (in the demo it plays the role of the sensor reading).
   const battery = Number(finalBatteryLevel);
   requireValue(Number.isInteger(battery) && battery >= CHARGE_TARGET && battery <= 100, 400, `Charging can be completed when the target battery level (${CHARGE_TARGET}%) is reached in this MVP.`);
   const now = nowIso();
@@ -218,58 +297,76 @@ export function completeCharging({ user, requestId, finalBatteryLevel = CHARGE_T
       .run(moveId, requestId, request.vehicle_id, request.charger_id, now, 'Charging completed; vehicle must be moved away before the charger is released (BR-46).');
     auditChange('ChargingRequest', requestId, 'CHARGING_COMPLETED', { finalBatteryLevel: battery, moveRequestId: moveId }, user.id);
   });
-  return { request: db.prepare('SELECT * FROM charging_requests WHERE id=?').get(requestId),
-    moveRequest: db.prepare('SELECT * FROM move_vehicle_requests WHERE charging_request_id=? AND direction=\'FROM_CHARGER\'').get(requestId) };
+  return {
+    request: db.prepare('SELECT * FROM charging_requests WHERE id=?').get(requestId),
+    moveRequest: db.prepare(`SELECT * FROM move_vehicle_requests WHERE charging_request_id=? AND direction='FROM_CHARGER'`).get(requestId)
+  };
+}
+
+// Operations staff may update any Move Vehicle Request. The owner of a personal vehicle may update
+// the requests of their own vehicle, because the owner moves a personal vehicle (BR-46, assumptions).
+function loadMoveForActor(user, moveRequestId) {
+  const move = db.prepare(`SELECT m.*, v.kind, v.owner_id, v.battery_level
+    FROM move_vehicle_requests m JOIN vehicles v ON v.id=m.vehicle_id WHERE m.id=?`).get(moveRequestId);
+  requireValue(move, 404, 'Move Vehicle Request not found.');
+  const isOperations = ['Operator', 'Admin'].includes(user?.role);
+  const isOwner = user?.role === 'Student' && move.kind === 'personal' && move.owner_id === user.id;
+  requireValue(isOperations || isOwner, 403,
+    'Only Operations staff, or the owner of a personal vehicle for their own vehicle, can update a Move Vehicle Request.');
+  return move;
 }
 
 export function startMoveRequest({ user, moveRequestId }) {
-  requireValue(['Operator','Admin'].includes(user?.role), 403, 'Only Operations staff can update a Move Vehicle Request.');
-  const move = db.prepare('SELECT * FROM move_vehicle_requests WHERE id=?').get(moveRequestId);
-  requireValue(move, 404, 'Move Vehicle Request not found.');
-  requireValue(move.status === 'Requested', 409, 'Only a Requested Move Vehicle Request can start.');
   const now = nowIso();
-  db.prepare(`UPDATE move_vehicle_requests SET status='In Progress', assigned_to=?, started_at=? WHERE id=?`)
-    .run(user.id, now, moveRequestId);
-  auditChange('MoveVehicleRequest', moveRequestId, 'MOVE_REQUEST_STARTED', {}, user.id);
+  transaction(() => {
+    const move = loadMoveForActor(user, moveRequestId);
+    requireValue(move.status === 'Requested', 409, 'Only a Requested Move Vehicle Request can start.');
+    db.prepare(`UPDATE move_vehicle_requests SET status='In Progress', assigned_to=?, started_at=? WHERE id=?`)
+      .run(user.id, now, moveRequestId);
+    auditChange('MoveVehicleRequest', moveRequestId, 'MOVE_REQUEST_STARTED', {}, user.id);
+  });
   return db.prepare('SELECT * FROM move_vehicle_requests WHERE id=?').get(moveRequestId);
 }
 
 export function completeMoveRequest({ user, moveRequestId }) {
-  requireValue(['Operator','Admin'].includes(user?.role), 403, 'Only Operations staff can complete a Move Vehicle Request.');
-  const move = db.prepare(`SELECT m.*, r.status AS request_status, v.kind, v.battery_level
-    FROM move_vehicle_requests m LEFT JOIN charging_requests r ON r.id=m.charging_request_id
-    JOIN vehicles v ON v.id=m.vehicle_id WHERE m.id=?`).get(moveRequestId);
-  requireValue(move, 404, 'Move Vehicle Request not found.');
-  requireValue(move.status === 'In Progress' || move.status === 'Requested', 409, 'This Move Vehicle Request is not active.');
   const now = nowIso();
   transaction(() => {
+    const move = loadMoveForActor(user, moveRequestId);
+    // Status model: Requested -> In Progress -> Done.
+    requireValue(move.status === 'In Progress', 409, 'Only an In Progress Move Vehicle Request can be completed. Start it first.');
+
+    // Validate first, write afterwards.
+    let heldSlotId = null;
+    if (move.direction === 'TO_CHARGER' && move.kind === 'shared') {
+      const slot = db.prepare(`SELECT id FROM parking_slots
+        WHERE current_vehicle_id=? AND slot_type='Shared' AND status='Occupied'`).get(move.vehicle_id);
+      requireValue(slot, 409, 'The shared vehicle must have its Shared return slot recorded before moving to a charger (BR-39).');
+      heldSlotId = slot.id;
+    }
+
     db.prepare(`UPDATE move_vehicle_requests SET status='Done', completed_at=?, assigned_to=COALESCE(assigned_to,?) WHERE id=?`)
       .run(now, user.id, moveRequestId);
+
     if (move.direction === 'TO_CHARGER') {
-      if (move.kind === 'shared') {
+      if (heldSlotId) {
         // BR-39: keep the vehicle's Shared slot reserved while the shared vehicle is charging.
-        const heldSlot = db.prepare(`UPDATE parking_slots SET status='Reserved', updated_at=?
-          WHERE current_vehicle_id=? AND slot_type='Shared' AND status='Occupied'`).run(now, move.vehicle_id);
-        requireValue(heldSlot.changes === 1, 409,
-          'The shared vehicle must have its Shared return slot recorded before moving to a charger (BR-39).');
+        db.prepare(`UPDATE parking_slots SET status='Reserved', updated_at=? WHERE id=?`).run(now, heldSlotId);
       }
       db.prepare(`UPDATE chargers SET status='Charging', updated_at=? WHERE id=? AND status='Assigned'`).run(now, move.charger_id);
       db.prepare(`UPDATE charging_requests SET status='Charging', charging_started_at=? WHERE id=? AND status='Assigned'`)
         .run(now, move.charging_request_id);
       db.prepare(`UPDATE vehicles SET status='Charging', updated_at=? WHERE id=?`).run(now, move.vehicle_id);
     } else {
-      // BR-46: charger becomes Available only after the removal request is Done.
+      // BR-46: the charger becomes Available only after the removal request is Done.
       db.prepare(`UPDATE chargers SET status='Available', current_vehicle_id=NULL, updated_at=? WHERE id=? AND status='Awaiting Removal'`)
         .run(now, move.charger_id);
-      const vehicleStatus = move.kind === 'shared' ? (move.battery_level >= 20 ? 'Available' : 'Needs Charging') : 'Available';
-      db.prepare(`UPDATE vehicles SET status=?, updated_at=? WHERE id=?`).run(vehicleStatus, now, move.vehicle_id);
+      // Charging only completes at or above the target level, so the vehicle is Available again.
+      db.prepare(`UPDATE vehicles SET status='Available', updated_at=? WHERE id=?`).run(now, move.vehicle_id);
       if (move.kind === 'shared') {
         // The Shared slot was held during charging; the vehicle now returns to that reserved slot.
         db.prepare(`UPDATE parking_slots SET status='Occupied', updated_at=?
           WHERE current_vehicle_id=? AND slot_type='Shared' AND status='Reserved'`).run(now, move.vehicle_id);
       }
-      if (move.kind === 'shared' && move.battery_level < 20) enqueueSharedVehicle(move.vehicle_id,
-        db.prepare('SELECT hub_id FROM vehicles WHERE id=?').get(move.vehicle_id).hub_id);
     }
     auditChange('MoveVehicleRequest', moveRequestId, 'MOVE_REQUEST_DONE', { direction: move.direction }, user.id);
   });
@@ -278,11 +375,13 @@ export function completeMoveRequest({ user, moveRequestId }) {
 }
 
 export function cancelMoveRequest({ user, moveRequestId }) {
-  requireValue(['Operator','Admin'].includes(user?.role), 403, 'Only Operations staff can cancel a Move Vehicle Request.');
+  requireValue(['Operator', 'Admin'].includes(user?.role), 403, 'Only Operations staff can cancel a Move Vehicle Request.');
   const move = db.prepare('SELECT * FROM move_vehicle_requests WHERE id=?').get(moveRequestId);
   requireValue(move, 404, 'Move Vehicle Request not found.');
   requireValue(move.status === 'Requested', 409, 'A move request can only be cancelled before movement starts.');
   requireValue(move.direction === 'TO_CHARGER', 409, 'A removal request cannot be cancelled until the vehicle is confirmed away from the charger.');
+  // OD-3: when Field Staff never move an assigned shared vehicle, an Operator cancels the request here
+  // and the request returns to the queue. No automatic timeout is defined by the requirements.
   transaction(() => {
     db.prepare(`UPDATE move_vehicle_requests SET status='Cancelled' WHERE id=?`).run(moveRequestId);
     db.prepare(`UPDATE chargers SET status='Available', current_vehicle_id=NULL, updated_at=? WHERE id=? AND status='Assigned'`)
@@ -296,10 +395,10 @@ export function cancelMoveRequest({ user, moveRequestId }) {
 }
 
 export function updateNextRequiredUsage({ user, requestId, nextRequiredUsageAt }) {
-  requireValue(['Operator','Admin'].includes(user?.role), 403, 'Only Operations staff can adjust a shared-vehicle schedule.');
+  requireValue(['Operator', 'Admin'].includes(user?.role), 403, 'Only Operations staff can adjust a shared-vehicle schedule.');
   const request = db.prepare(`SELECT r.*, v.kind FROM charging_requests r JOIN vehicles v ON v.id=r.vehicle_id WHERE r.id=?`).get(requestId);
   requireValue(request && request.kind === 'shared', 404, 'Only shared-vehicle charging requests can be adjusted here.');
-  requireValue(['Queued','Assigned'].includes(request.status), 409, 'This charging request can no longer be adjusted.');
+  requireValue(['Queued', 'Assigned'].includes(request.status), 409, 'This charging request can no longer be adjusted.');
   const time = new Date(nextRequiredUsageAt);
   requireValue(Number.isFinite(time.getTime()) && time.getTime() > Date.now(), 400, 'Next Required Usage Time must be in the future.');
   db.prepare('UPDATE charging_requests SET next_required_usage_at=? WHERE id=?').run(time.toISOString(), requestId);
@@ -340,8 +439,9 @@ export function runMaintenance() {
       expiredCharging++;
     }
   });
-  // Simulator refresh: status timestamp is refreshed without inventing changes to resource state (NI-02).
-  db.prepare('UPDATE hubs SET sensor_updated_at=?').run(now);
-  if (expiredBookings || expiredParking || expiredCharging) runScheduler();
+  // NI-02: the simulated feed refreshes the timestamp only while it is enabled, so Stale status can be demonstrated.
+  if (simulatedSensorFeedEnabled) db.prepare('UPDATE hubs SET sensor_updated_at=?').run(now);
+  // NI-04: the Charging Scheduler runs on every maintenance cycle, because the Waiting Duration changes with time.
+  runScheduler();
   return { expiredBookings, expiredParking, expiredCharging };
 }
