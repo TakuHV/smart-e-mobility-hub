@@ -1,10 +1,19 @@
 PRAGMA foreign_keys = ON;
 
+/*
+ * Rules for this file
+ *  - It runs at every start, so every statement must be CREATE ... IF NOT EXISTS.
+ *  - Indexes and triggers added here also reach an existing database file.
+ *    A changed column or CHECK does NOT: delete data/smart_e_mobility.sqlite (and -wal, -shm) to rebuild it.
+ *  - All timestamps are UTC ISO-8601 strings written by the code (new Date().toISOString()). The code compares them
+ *    as text, so the columns it compares reject any other format (CHECK ... GLOB). Do not use CURRENT_TIMESTAMP for them.
+ */
+
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   full_name TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('Student','Operator','Simulation Operator','Admin')),
-  created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(full_name, role)
 );
 
@@ -15,9 +24,10 @@ CREATE TABLE IF NOT EXISTS hubs (
   location TEXT NOT NULL,
   open_time TEXT NOT NULL DEFAULT '05:00',
   close_time TEXT NOT NULL DEFAULT '23:00',
-  power_limit_kw REAL NOT NULL,
+  power_limit_kw REAL NOT NULL CHECK (power_limit_kw > 0),
   status TEXT NOT NULL DEFAULT 'Open',
-  sensor_updated_at TEXT NOT NULL
+  sensor_updated_at TEXT NOT NULL,
+  CHECK (open_time < close_time)                       -- 'HH:MM', same day (BR-42)
 );
 
 CREATE TABLE IF NOT EXISTS vehicles (
@@ -30,7 +40,7 @@ CREATE TABLE IF NOT EXISTS vehicles (
   owner_id TEXT REFERENCES users(id),
   battery_level INTEGER NOT NULL CHECK (battery_level BETWEEN 0 AND 100),
   status TEXT NOT NULL,
-  next_required_usage_at TEXT,
+  next_required_usage_at TEXT,                         -- NULL = not entered by the Operator (OD-2)
   updated_at TEXT NOT NULL,
   CHECK ((kind='shared' AND owner_id IS NULL) OR (kind='personal' AND owner_id IS NOT NULL))
 );
@@ -52,7 +62,7 @@ CREATE TABLE IF NOT EXISTS chargers (
   hub_id TEXT NOT NULL REFERENCES hubs(id),
   code TEXT NOT NULL,
   connector_types_json TEXT NOT NULL,
-  power_kw REAL NOT NULL,
+  power_kw REAL NOT NULL CHECK (power_kw > 0),
   status TEXT NOT NULL DEFAULT 'Available',
   current_vehicle_id TEXT REFERENCES vehicles(id),
   updated_at TEXT NOT NULL,
@@ -65,7 +75,8 @@ CREATE TABLE IF NOT EXISTS bookings (
   vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
   hub_id TEXT NOT NULL REFERENCES hubs(id),
   status TEXT NOT NULL CHECK (status IN ('Confirmed','In Progress','Overdue','Completed','Cancelled','Expired')),
-  pickup_deadline TEXT NOT NULL,
+  pickup_deadline TEXT NOT NULL
+    CHECK (pickup_deadline GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
   started_at TEXT,
   returned_at TEXT,
   created_at TEXT NOT NULL
@@ -78,12 +89,16 @@ CREATE TABLE IF NOT EXISTS parking_reservations (
   hub_id TEXT NOT NULL REFERENCES hubs(id),
   slot_id TEXT NOT NULL REFERENCES parking_slots(id),
   status TEXT NOT NULL CHECK (status IN ('Confirmed','In Progress','Completed','Cancelled','Expired')),
-  start_at TEXT NOT NULL,
-  end_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
+  start_at TEXT NOT NULL
+    CHECK (start_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  end_at TEXT NOT NULL
+    CHECK (end_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  expires_at TEXT NOT NULL
+    CHECK (expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
   arrived_at TEXT,
   completed_at TEXT,
-  created_at TEXT NOT NULL
+  created_at TEXT NOT NULL,
+  CHECK (end_at > start_at)
 );
 
 CREATE TABLE IF NOT EXISTS charging_requests (
@@ -93,9 +108,12 @@ CREATE TABLE IF NOT EXISTS charging_requests (
   hub_id TEXT NOT NULL REFERENCES hubs(id),
   request_type TEXT NOT NULL CHECK (request_type IN ('personal','shared_automatic')),
   status TEXT NOT NULL CHECK (status IN ('Queued','Assigned','Charging','Completed','Cancelled','Expired')),
-  battery_level INTEGER NOT NULL,
-  next_required_usage_at TEXT NOT NULL,
-  registered_at TEXT NOT NULL,
+  battery_level INTEGER NOT NULL CHECK (battery_level BETWEEN 0 AND 100),
+  next_required_usage_at TEXT                          -- NULL when unknown (OD-2): urgency is then 0
+    CHECK (next_required_usage_at IS NULL
+      OR next_required_usage_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  registered_at TEXT NOT NULL
+    CHECK (registered_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
   assigned_at TEXT,
   connect_deadline TEXT,
   charger_id TEXT REFERENCES chargers(id),
@@ -123,13 +141,15 @@ CREATE TABLE IF NOT EXISTS move_vehicle_requests (
 CREATE TABLE IF NOT EXISTS violations (
   id TEXT PRIMARY KEY,
   user_id TEXT NOT NULL REFERENCES users(id),
-  points INTEGER NOT NULL,
+  points INTEGER NOT NULL CHECK (points > 0),
   reason TEXT NOT NULL,
   source_type TEXT,
   source_id TEXT,
-  recorded_at TEXT NOT NULL,
-  expires_at TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'Recorded'
+  recorded_at TEXT NOT NULL
+    CHECK (recorded_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  expires_at TEXT NOT NULL
+    CHECK (expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
+  status TEXT NOT NULL DEFAULT 'Recorded' CHECK (status IN ('Recorded','Upheld','Disputed','Dismissed'))
 );
 
 CREATE TABLE IF NOT EXISTS incidents (
@@ -180,17 +200,53 @@ CREATE TABLE IF NOT EXISTS recommendation_handoffs (
   id TEXT PRIMARY KEY,
   recommendation_id TEXT NOT NULL REFERENCES recommendations(id),
   target_workflow TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'Pending',
+  status TEXT NOT NULL DEFAULT 'Pending' CHECK (status IN ('Pending','Completed')),
   prefilled_payload_json TEXT NOT NULL,
   created_by TEXT NOT NULL REFERENCES users(id),
   created_at TEXT NOT NULL,
   completed_at TEXT
 );
 
+/* ---------- Indexes for the queries the services run ---------- */
 CREATE INDEX IF NOT EXISTS idx_vehicles_hub_kind_status ON vehicles(hub_id, kind, status);
 CREATE INDEX IF NOT EXISTS idx_slots_hub_type_status ON parking_slots(hub_id, slot_type, status);
+CREATE INDEX IF NOT EXISTS idx_slots_current_vehicle ON parking_slots(current_vehicle_id);
 CREATE INDEX IF NOT EXISTS idx_chargers_hub_status ON chargers(hub_id, status);
 CREATE INDEX IF NOT EXISTS idx_bookings_user_status ON bookings(user_id, status);
+CREATE INDEX IF NOT EXISTS idx_bookings_vehicle_status ON bookings(vehicle_id, status);
 CREATE INDEX IF NOT EXISTS idx_parking_reservation_vehicle_period ON parking_reservations(vehicle_id, start_at, end_at, status);
+CREATE INDEX IF NOT EXISTS idx_parking_reservation_slot_period ON parking_reservations(slot_id, status, start_at, end_at);
 CREATE INDEX IF NOT EXISTS idx_charging_queue ON charging_requests(hub_id, status, registered_at);
+CREATE INDEX IF NOT EXISTS idx_charging_vehicle_status ON charging_requests(vehicle_id, status);
+CREATE INDEX IF NOT EXISTS idx_charging_charger ON charging_requests(charger_id, status);
 CREATE INDEX IF NOT EXISTS idx_move_requests_status ON move_vehicle_requests(status);
+CREATE INDEX IF NOT EXISTS idx_violations_user_status ON violations(user_id, status, expires_at);
+CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
+CREATE INDEX IF NOT EXISTS idx_recommendations_run ON recommendations(run_id);
+
+/* ---------- Rules the database itself must enforce (BR-08, BR-09, BR-36, BR-46, BR-33, BR-52) ---------- */
+-- A student has one active shared-vehicle booking (BR-09); a vehicle has one active booking (BR-08).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_active_booking_per_user
+  ON bookings(user_id) WHERE status IN ('Confirmed','In Progress','Overdue');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_active_booking_per_vehicle
+  ON bookings(vehicle_id) WHERE status IN ('Confirmed','In Progress','Overdue');
+-- A slot holds one pending reservation at a time (MVP model, see parkingService).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_pending_reservation_per_slot
+  ON parking_reservations(slot_id) WHERE status IN ('Confirmed','In Progress');
+-- A vehicle has one active charging request, and sits at one charger at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_active_charge_per_vehicle
+  ON charging_requests(vehicle_id) WHERE status IN ('Queued','Assigned','Charging');
+CREATE UNIQUE INDEX IF NOT EXISTS ux_charger_current_vehicle
+  ON chargers(current_vehicle_id) WHERE current_vehicle_id IS NOT NULL;
+-- One open Move Vehicle Request per charging request and direction.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_open_move_per_request_direction
+  ON move_vehicle_requests(charging_request_id, direction) WHERE status IN ('Requested','In Progress');
+-- The same source is never penalised twice (matches addViolation).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_violation_source
+  ON violations(user_id, source_type, source_id) WHERE source_type IS NOT NULL AND source_id IS NOT NULL;
+
+-- A stored simulation run cannot be edited or deleted (BR-33).
+CREATE TRIGGER IF NOT EXISTS simulation_runs_no_update BEFORE UPDATE ON simulation_runs
+BEGIN SELECT RAISE(ABORT, 'Stored simulation runs cannot be edited (BR-33)'); END;
+CREATE TRIGGER IF NOT EXISTS simulation_runs_no_delete BEFORE DELETE ON simulation_runs
+BEGIN SELECT RAISE(ABORT, 'Stored simulation runs cannot be deleted (BR-33)'); END;
