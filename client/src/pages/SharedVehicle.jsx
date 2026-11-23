@@ -3,6 +3,8 @@ import { api } from '../api';
 import SectionHeader from '../components/SectionHeader';
 import StatusBadge from '../components/StatusBadge';
 import { EmptyState, Feedback } from '../components/Feedback';
+import RefreshButton from '../components/RefreshButton';
+import { scrollTopOnPhone } from '../hooks';
 
 const fmtTime = value => (value ? new Date(value).toLocaleTimeString() : '—');
 const fmtDateTime = value => (value ? new Date(value).toLocaleString() : '—');
@@ -42,7 +44,7 @@ export default function SharedVehicle({ user }) {
 
   async function run(call, message) {
     setError(''); setSuccess('');
-    try { const result = await call(); setSuccess(typeof message === 'function' ? message(result) : message); await load(); return result; }
+    try { const result = await call(); setSuccess(typeof message === 'function' ? message(result) : message); await load(); scrollTopOnPhone(); return result; }
     catch (err) { setError(err.message); return null; }
   }
   const book = () => run(() => api('/vehicles/bookings', { method: 'POST', body: { vehicleId: selectedVehicle } }),
@@ -56,7 +58,7 @@ export default function SharedVehicle({ user }) {
   ).then(r => { if (r) { setReturnSlotId(''); setReportProblem(false); setProblemNote(''); } });
 
   return <>
-    <SectionHeader eyebrow="STUDENT WORKFLOW · UC-005 / UC-006 / UC-007" title="Shared Vehicle Lifecycle" description="Book an available shared EV, pick it up and return it to a free Shared slot." action={<button className="button secondary" onClick={load}>↻ Refresh</button>}/>
+    <SectionHeader eyebrow="STUDENT WORKFLOW · UC-005 / UC-006 / UC-007" title="Shared Vehicle Lifecycle" description="Book an available shared EV, pick it up and return it to a free Shared slot." action={<RefreshButton onClick={load}/>}/>
     <Feedback error={error} success={success}/>
     {!isStudent && <div className="feedback is-info">You are signed in as {user.role}. Booking, pickup and return are student actions; this page only shows them.</div>}
     <div className="content-grid two-col">
@@ -71,10 +73,10 @@ export default function SharedVehicle({ user }) {
             <div className="battery-line"><span>Battery</span><b>{v.battery_level}%</b></div><div className="battery-track"><i style={{ width: `${v.battery_level}%` }}/></div>
           </button>)}
         </div>
-        <button className="button primary full" disabled={!selectedVehicle || !isStudent} onClick={book}>Confirm booking <span>→</span></button>
+        <button className="button primary full sticky-cta" disabled={!selectedVehicle || !isStudent} onClick={book}>Confirm booking <span>→</span></button>
         <p className="helper-text">Battery must be at least 20%, the vehicle is held for 15 minutes, and you can hold one active booking. Suspended students cannot book.</p>
       </section>
-      <section className="card-surface padded">
+      <section className={`card-surface padded ${activeTrip ? 'priority-mobile' : ''}`}>
         <div className="section-mini-head"><div><span className="eyebrow">UC-006 / UC-007</span><h3>Active trip & return</h3></div><span className="mini-icon">⌁</span></div>
         {activeTrip ? <div className="active-trip">
           <div className="active-trip-head"><div><span className="hub-code">{activeTrip.id.slice(0, 14)}</span><h4>{activeTrip.plate}</h4><span>{activeTrip.hub_name}{tripMinutes != null ? ` · started ${tripMinutes} min ago` : ''}</span></div><StatusBadge value={activeTrip.status}/></div>
@@ -92,9 +94,9 @@ export default function SharedVehicle({ user }) {
     </div>
     <section className="card-surface padded section-gap">
       <div className="subsection-title"><strong>My bookings & trip history</strong><span>{bookings.length} {bookings.length === 1 ? 'record' : 'records'}</span></div>
-      {bookings.length === 0 ? <EmptyState title="No bookings yet" description="Your shared-vehicle bookings will appear here."/> : <div className="table-wrap"><table>
+      {bookings.length === 0 ? <EmptyState title="No bookings yet" description="Your shared-vehicle bookings will appear here."/> : <div className="table-wrap"><table className="responsive-table">
         <thead><tr><th>Vehicle</th><th>Hub</th><th>Status</th><th>Pickup deadline</th><th>Action</th></tr></thead>
-        <tbody>{bookings.map(b => <tr key={b.id}><td><strong>{b.plate}</strong><small>{b.id.slice(0, 12)}</small></td><td>{b.hub_name}</td><td><StatusBadge value={b.status}/></td><td>{fmtDateTime(b.pickup_deadline)}</td><td>
+        <tbody>{bookings.map(b => <tr key={b.id}><td className="primary"><strong>{b.plate}</strong><small>{b.id.slice(0, 12)}</small></td><td data-label="Hub">{b.hub_name}</td><td data-label="Status"><StatusBadge value={b.status}/></td><td data-label="Pickup deadline">{fmtDateTime(b.pickup_deadline)}</td><td className={`actions ${b.status === 'Confirmed' && isStudent ? '' : 'empty'}`}>
           {b.status === 'Confirmed' && isStudent ? <div className="button-row"><button className="button small primary" onClick={() => pickup(b.id)}>Pick up</button><button className="button small ghost" onClick={() => cancel(b.id)}>Cancel</button></div> : '—'}
         </td></tr>)}</tbody>
       </table></div>}

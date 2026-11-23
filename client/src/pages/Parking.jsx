@@ -3,6 +3,8 @@ import { api, query, isoToLocalInput, localInputToIso } from '../api';
 import SectionHeader from '../components/SectionHeader';
 import StatusBadge from '../components/StatusBadge';
 import { EmptyState, Feedback } from '../components/Feedback';
+import RefreshButton from '../components/RefreshButton';
+import { scrollTopOnPhone } from '../hooks';
 
 const defaultDate = offsetMinutes => isoToLocalInput(new Date(Date.now() + offsetMinutes * 60000));
 const fmtTime = value => (value ? new Date(value).toLocaleTimeString() : '—');
@@ -67,7 +69,7 @@ export default function Parking({ user }) {
     try {
       const { reservation } = await api('/parking/reservations', { method: 'POST', body: { vehicleId, hubId, slotId, startAt: localInputToIso(startAt), endAt: localInputToIso(endAt) } });
       setSuccess(`Reservation confirmed. Arrive before ${fmtTime(reservation.expires_at)} and leave by ${fmtTime(reservation.must_leave_by)}.`);
-      setSlotId(''); await load(); await loadSlots();
+      setSlotId(''); await load(); await loadSlots(); scrollTopOnPhone();
     } catch (err) { setError(err.message); }
   }
   async function action(id, name) {
@@ -77,13 +79,13 @@ export default function Parking({ user }) {
       setSuccess(name === 'arrive' ? 'Arrival recorded. Parking spot is now Occupied.'
         : name === 'complete' ? (result.lateMinutes > 15 ? `Departure recorded, ${Math.round(result.lateMinutes)} minutes after the end time (overstay). Slot released.` : 'Vehicle departure recorded. Slot released.')
         : 'Reservation cancelled.');
-      await load(); await loadSlots();
+      await load(); await loadSlots(); scrollTopOnPhone();
     } catch (err) { setError(err.message); }
   }
 
   const now = Date.now();
   return <>
-    <SectionHeader eyebrow="STUDENT WORKFLOW · UC-008" title="Personal Parking" description="Register a personal EV and reserve a compatible Personal slot for a selected time period." action={<button className="button secondary" onClick={() => { load(); loadSlots(); }}>↻ Refresh</button>}/>
+    <SectionHeader eyebrow="STUDENT WORKFLOW · UC-008" title="Personal Parking" description="Register a personal EV and reserve a compatible Personal slot for a selected time period." action={<RefreshButton onClick={() => { load(); loadSlots(); }}/>}/>
     <Feedback error={error} success={success}/>
     {!isStudent && <div className="feedback is-info">You are signed in as {user.role}. Operations staff can record arrivals and departures; reservations are created by students.</div>}
     <div className="content-grid two-col">
@@ -109,18 +111,18 @@ export default function Parking({ user }) {
             <label>End time<input type="datetime-local" value={endAt} onChange={e => setEndAt(e.target.value)} required/></label>
           </div>
           <label>Free Personal slot for this period<select value={slotId} onChange={e => setSlotId(e.target.value)} required><option value="">{availableSlots.length ? 'Choose a free slot' : 'No compatible slot is free'}</option>{availableSlots.map(s => <option key={s.id} value={s.id}>{s.code} · {s.hub_name}</option>)}</select></label>
-          <button className="button primary full" type="submit" disabled={!isStudent || !vehicleId || !slotId}>Confirm parking reservation <span>→</span></button>
+          <button className="button primary full sticky-cta" type="submit" disabled={!isStudent || !vehicleId || !slotId}>Confirm parking reservation <span>→</span></button>
         </form>
         <p className="helper-text">Only slots that fit your vehicle type and are free for the whole period are listed. The reservation is held for 15 minutes after the start time, and you may leave up to 15 minutes after the end time. It cannot overlap an active charging request of the same vehicle.</p>
       </section>
     </div>
     <section className="card-surface padded section-gap">
       <div className="subsection-title"><strong>Parking reservations</strong><span>{reservations.length} {reservations.length === 1 ? 'record' : 'records'}</span></div>
-      {reservations.length === 0 ? <EmptyState title="No parking reservations" description="Your confirmed, active and completed reservations will appear here."/> : <div className="table-wrap"><table>
+      {reservations.length === 0 ? <EmptyState title="No parking reservations" description="Your confirmed, active and completed reservations will appear here."/> : <div className="table-wrap"><table className="responsive-table">
         <thead><tr><th>Vehicle</th><th>Hub / Slot</th><th>Period</th><th>Status</th><th>Action</th></tr></thead>
         <tbody>{reservations.map(r => {
           const started = now >= Date.parse(r.start_at);
-          return <tr key={r.id}><td><strong>{r.plate}</strong><small>{r.vehicle_type}</small></td><td>{r.hub_name}<small>{r.slot_code}</small></td><td>{new Date(r.start_at).toLocaleString()}<small>to {fmtTime(r.end_at)}</small></td><td><StatusBadge value={r.status}/></td><td>
+          return <tr key={r.id}><td className="primary"><strong>{r.plate}</strong><small>{r.vehicle_type}</small></td><td data-label="Hub / slot">{r.hub_name}<small>{r.slot_code}</small></td><td data-label="Period">{new Date(r.start_at).toLocaleString()}<small>to {fmtTime(r.end_at)}</small></td><td data-label="Status"><StatusBadge value={r.status}/></td><td className={`actions ${['Confirmed', 'In Progress'].includes(r.status) ? '' : 'empty'}`}>
             {r.status === 'Confirmed' && started ? <button className="button small primary" onClick={() => action(r.id, 'arrive')}>Arrived</button>
               : r.status === 'Confirmed' ? <button className="button small ghost" onClick={() => action(r.id, 'cancel')}>Cancel</button>
               : r.status === 'In Progress' ? <button className="button small secondary" onClick={() => action(r.id, 'complete')}>Vehicle departed</button>

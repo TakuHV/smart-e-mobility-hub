@@ -1,0 +1,11 @@
+{
+  "name": "Smart E-Mobility Hub",
+  "short_name": "e-Mobility",
+  "description": "Shared vehicles, personal parking and smart charging on campus.",
+  "start_url": "/",
+  "display": "standalone",
+  "orientation": "portrait",
+  "background_color": "#f3f6fa",
+  "theme_color": "#ffffff",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}

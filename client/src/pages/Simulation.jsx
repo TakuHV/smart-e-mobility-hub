@@ -3,6 +3,7 @@ import { api } from '../api';
 import SectionHeader from '../components/SectionHeader';
 import StatusBadge from '../components/StatusBadge';
 import { EmptyState, Feedback } from '../components/Feedback';
+import RefreshButton from '../components/RefreshButton';
 
 const scenarios = [
   ['parking_surge', 'Sudden increase of arrivals'],
@@ -127,7 +128,7 @@ export default function Simulation({ user }) {
   }
 
   return <>
-    <SectionHeader eyebrow="STRATEGIC PLANNING · UC-023 / UC-024 / UC-025" title="What-if Simulation" description="Run isolated scenarios, compare stored results and hand recommendations to their matching operational workflows." action={<button className="button secondary" onClick={load}>↻ Refresh</button>}/>
+    <SectionHeader eyebrow="STRATEGIC PLANNING · UC-023 / UC-024 / UC-025" title="What-if Simulation" description="Run isolated scenarios, compare stored results and hand recommendations to their matching operational workflows." action={<RefreshButton onClick={load}/>}/>
     <Feedback error={error} success={success}/>
     <div className={`simulation-layout ${canRun ? '' : 'single'}`}>
       {canRun && <section className="card-surface padded simulation-form-panel">

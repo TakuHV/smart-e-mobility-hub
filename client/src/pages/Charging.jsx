@@ -3,6 +3,8 @@ import { api, isoToLocalInput, localInputToIso } from '../api';
 import SectionHeader from '../components/SectionHeader';
 import StatusBadge from '../components/StatusBadge';
 import { EmptyState, Feedback } from '../components/Feedback';
+import RefreshButton from '../components/RefreshButton';
+import { scrollTopOnPhone } from '../hooks';
 
 const fmtTime = value => (value ? new Date(value).toLocaleTimeString() : '—');
 const fmtDateTime = value => (value ? new Date(value).toLocaleString() : 'Not set');
@@ -40,12 +42,12 @@ export default function Charging({ user }) {
     try {
       await api('/charging/requests', { method: 'POST', body: { hubId, vehicleId, batteryLevel: Number(battery), nextRequiredUsageAt } });
       setSuccess('Charging request registered in the common queue. The Charging Scheduler evaluated the request.');
-      await load();
+      await load(); scrollTopOnPhone();
     } catch (err) { setError(err.message); }
   }
   async function action(path, message) {
     setError(''); setSuccess('');
-    try { await api(path, { method: 'POST', body: {} }); setSuccess(message); await load(); }
+    try { await api(path, { method: 'POST', body: {} }); setSuccess(message); await load(); scrollTopOnPhone(); }
     catch (err) { setError(err.message); }
   }
   const runScheduler = () => action('/charging/run-scheduler', 'Scheduler cycle completed. Power limit and connector compatibility were checked.');
@@ -63,7 +65,7 @@ export default function Charging({ user }) {
   }
 
   return <>
-    <SectionHeader eyebrow="UC-009 · UC-021 · UC-022" title="Smart Charging" description="One common charging area for shared and personal EVs. The backend manages queue order, charger assignments and Move Vehicle Requests." action={<button className="button secondary" onClick={load}>↻ Refresh</button>}/>
+    <SectionHeader eyebrow="UC-009 · UC-021 · UC-022" title="Smart Charging" description="One common charging area for shared and personal EVs. The backend manages queue order, charger assignments and Move Vehicle Requests." action={<RefreshButton onClick={load}/>}/>
     <Feedback error={error} success={success}/>
     <div className="charging-layout">
       <section className="card-surface padded request-panel">
@@ -73,7 +75,7 @@ export default function Charging({ user }) {
           <label>Mobility Hub<select value={hubId} onChange={e => setHubId(e.target.value)}>{hubs.map(h => <option value={h.id} key={h.id}>{h.name}</option>)}</select></label>
           <label>Current battery (%)<input type="number" min="0" max="100" value={battery} onChange={e => setBattery(e.target.value)}/></label>
           <label>Next Required Usage Time<input type="datetime-local" value={nextUse} onChange={e => setNextUse(e.target.value)} required/></label>
-          <button className="button primary full" disabled={!vehicleId}>Join charging queue <span>→</span></button>
+          <button className="button primary full sticky-cta" disabled={!vehicleId}>Join charging queue <span>→</span></button>
           <p className="hint">The vehicle must be at the selected Hub, and the period must be inside its operating hours on the same day.</p>
         </form> : <div className="form-stack">
           <p className="muted-text">Run the Charging Scheduler on demand, move vehicles and adjust the Next Required Usage Time of shared vehicles. Personal charging requests are registered by students.</p>
@@ -84,13 +86,13 @@ export default function Charging({ user }) {
       <section className="card-surface padded queue-panel">
         <div className="section-mini-head"><div><span className="eyebrow">UC-021 / UC-022</span><h3>Charging queue & assignments</h3></div>{isOperator && <button className="button small secondary" onClick={runScheduler}>▶ Run scheduler</button>}</div>
         <div className="queue-summary"><div><b>{data.requests.filter(r => r.status === 'Queued').length}</b><span>Queued</span></div><div><b>{data.requests.filter(r => r.status === 'Assigned').length}</b><span>Assigned</span></div><div><b>{data.requests.filter(r => r.status === 'Charging').length}</b><span>Charging</span></div><div><b>{data.chargers.filter(c => c.status === 'Available').length}</b><span>Free chargers</span></div></div>
-        {data.requests.length === 0 ? <EmptyState title="No charging requests" description="A personal request or a low-battery shared vehicle will appear here."/> : <div className="table-wrap"><table>
+        {data.requests.length === 0 ? <EmptyState title="No charging requests" description="A personal request or a low-battery shared vehicle will appear here."/> : <div className="table-wrap"><table className="responsive-table">
           <thead><tr><th>Vehicle</th><th>Hub</th><th className="num">Battery</th><th>Next use</th><th>Status</th><th>Action</th></tr></thead>
           <tbody>{data.requests.map(r => <tr key={r.id}>
-            <td><strong>{r.plate}</strong><small>{r.request_type === 'shared_automatic' ? 'Shared · automatic' : 'Personal'}{r.priority_class ? ` · class ${r.priority_class}` : ''} · score {Number(r.priority_score || 0).toFixed(1)}</small></td>
-            <td>{r.hub_name}</td><td className="num">{r.battery_level}%</td><td>{fmtDateTime(r.next_required_usage_at)}</td>
-            <td><StatusBadge value={r.status}/><small>{r.charger_code || (r.estimated_start_at ? `Est. start ${fmtTime(r.estimated_start_at)}` : 'Estimate pending')}</small></td>
-            <td><div className="button-row">
+            <td className="primary"><strong>{r.plate}</strong><small>{r.request_type === 'shared_automatic' ? 'Shared · automatic' : 'Personal'}{r.priority_class ? ` · class ${r.priority_class}` : ''} · score {Number(r.priority_score || 0).toFixed(1)}</small></td>
+            <td data-label="Hub">{r.hub_name}</td><td className="num" data-label="Battery">{r.battery_level}%</td><td data-label="Next use">{fmtDateTime(r.next_required_usage_at)}</td>
+            <td data-label="Status"><StatusBadge value={r.status}/><small>{r.charger_code || (r.estimated_start_at ? `Est. start ${fmtTime(r.estimated_start_at)}` : 'Estimate pending')}</small></td>
+            <td className="actions"><div className="button-row">
               {r.status === 'Assigned' && r.request_type === 'personal' && r.user_id === user.id && <button className="button small primary" onClick={() => action(`/charging/requests/${r.id}/connect`, 'Vehicle connected. Charging session started.')}>Connect vehicle</button>}
               {r.status === 'Charging' && (isOperator || r.user_id === user.id) && <button className="button small secondary" onClick={() => action(`/charging/requests/${r.id}/complete`, 'Charging completed. A Move Vehicle Request was created; the charger stays occupied until the removal is Done.')}>Complete</button>}
               {isOperator && r.kind === 'shared' && ['Queued', 'Assigned'].includes(r.status) && <button className="button small ghost" onClick={() => updateUsage(r)}>Next use</button>}
