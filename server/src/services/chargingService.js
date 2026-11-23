@@ -1,27 +1,17 @@
-import { readFileSync } from 'node:fs';
-import { resolve } from 'node:path';
-import { db, transaction, makeId, nowIso, projectRoot } from '../database/db.js';
+import { db, transaction, makeId, nowIso } from '../database/db.js';
+import { config } from '../config.js';
 import { requireValue, isStudentSuspended, auditChange, addViolation, inHubOperatingHours } from './commonService.js';
 
-const config = JSON.parse(readFileSync(resolve(projectRoot, 'data/configuration.json'), 'utf8'));
 const CHARGE_TARGET = config.charging.targetBatteryPercent;
 const CONNECT_MINUTES = config.charging.personalConnectWindowMinutes;
 
 /*
  * Scheduler parameters.
  * Source: Technical Design Document, sections 2.2 and 2.3. All of these are PROPOSED VALUES,
- * not approved requirements. They can be overridden in data/configuration.json under
- * "charging.scheduler"; the defaults below apply when a key is missing.
+ * not approved requirements. They are set in data/configuration.json under "charging.scheduler"
+ * (defaults and validation: server/src/config.js).
  */
-const S = config.charging.scheduler ?? {};
-const SCHED = {
-  weights: { need: 0.5, urgency: 0.3, waiting: 0.2, ...S.weights },
-  classH: { batteryBelowPercent: 10, usageWithinMinutes: 60, ...S.classH },
-  urgencyHorizonMinutes: S.urgencyHorizonMinutes ?? 240,
-  waitingDivisorMinutes: S.waitingDivisorMinutes ?? 3,
-  // Demo assumption used only to show approximate queue times (BR-43: an estimate, not a guarantee).
-  estimatedSessionMinutes: S.estimatedSessionMinutes ?? config.charging.demoAssumptions?.estimatedSessionMinutes ?? 45
-};
+const SCHED = config.charging.scheduler; // validated, with defaults, in config.js
 
 // Demo switch for NI-02: when the simulated feed is paused, hub data stops being refreshed and becomes Stale.
 let simulatedSensorFeedEnabled = true;
@@ -241,7 +231,20 @@ export function listChargingData(user) {
     LEFT JOIN chargers c ON c.id=r.charger_id WHERE 1=1 ${studentFilter}
     ORDER BY CASE r.status WHEN 'Charging' THEN 1 WHEN 'Assigned' THEN 2 WHEN 'Queued' THEN 3 ELSE 4 END,
       r.priority_score DESC, r.registered_at`;
-  const requests = user.role === 'Student' ? db.prepare(requestSql).all(user.id) : db.prepare(requestSql).all();
+  const rows = user.role === 'Student' ? db.prepare(requestSql).all(user.id) : db.prepare(requestSql).all();
+  // Queued requests show their live class and score, in scheduler order; the stored score exists only after an assignment.
+  const nowMs = Date.now();
+  const ranked = new Map();
+  for (const hubId of new Set(rows.filter(r => r.status === 'Queued').map(r => r.hub_id))) {
+    rankQueue(hubId, nowMs).forEach((r, index) => ranked.set(r.id, { index, score: Math.round(r.score * 100) / 100, cls: r.cls }));
+  }
+  const statusOrder = { Charging: 1, Assigned: 2, Queued: 3 };
+  const requests = rows
+    .map(r => (ranked.has(r.id) ? { ...r, priority_score: ranked.get(r.id).score, priority_class: ranked.get(r.id).cls } : r))
+    .sort((a, b) => (statusOrder[a.status] ?? 4) - (statusOrder[b.status] ?? 4)
+      || (a.status === 'Queued'
+      ? String(a.hub_id).localeCompare(String(b.hub_id)) || ranked.get(a.id).index - ranked.get(b.id).index
+      : 0));
   const chargers = db.prepare(`SELECT c.*, h.name AS hub_name, v.plate AS vehicle_plate
     FROM chargers c JOIN hubs h ON h.id=c.hub_id LEFT JOIN vehicles v ON v.id=c.current_vehicle_id
     ORDER BY h.name,c.code`).all();

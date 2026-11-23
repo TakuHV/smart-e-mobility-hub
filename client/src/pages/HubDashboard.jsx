@@ -1,9 +1,12 @@
 import { useEffect, useState } from 'react';
-import { api } from '../api';
+import { api, query } from '../api';
 import SectionHeader from '../components/SectionHeader';
 import StatCard from '../components/StatCard';
 import StatusBadge from '../components/StatusBadge';
 import { EmptyState, Feedback } from '../components/Feedback';
+
+const REFRESH_MS = 30000;
+const fmtTime = value => (value ? new Date(value).toLocaleTimeString() : '—');
 
 export default function HubDashboard() {
   const [hubs, setHubs] = useState([]);
@@ -14,48 +17,62 @@ export default function HubDashboard() {
   const [error, setError] = useState('');
   const [loading, setLoading] = useState(true);
 
-  async function loadHubs() {
-    setLoading(true); setError('');
+  async function loadHubs({ silent = false } = {}) {
+    if (!silent) setLoading(true);
+    setError('');
     try {
-      const result = await api(`/hubs?q=${encodeURIComponent(q)}&resourceType=${resourceType}`);
+      const result = await api(`/hubs${query({ q, resourceType })}`);
       setHubs(result.hubs);
-      if (!selectedId && result.hubs[0]) setSelectedId(result.hubs[0].id);
-      else if (selectedId && !result.hubs.some(h => h.id === selectedId)) setSelectedId(result.hubs[0]?.id || '');
+      setSelectedId(prev => (result.hubs.some(h => h.id === prev) ? prev : (result.hubs[0]?.id || '')));
     } catch (err) { setError(err.message); }
     finally { setLoading(false); }
   }
   async function loadDetail(id) {
     if (!id) { setDetail(null); return; }
-    try { const result = await api(`/hubs/${id}/status`); setDetail(result.status); }
+    try { setDetail((await api(`/hubs/${id}/status`)).status); }
     catch (err) { setError(err.message); }
   }
-  useEffect(() => { loadHubs(); }, [resourceType]);
-  useEffect(() => { if (selectedId) loadDetail(selectedId); }, [selectedId]);
-  useEffect(() => { const timer = setTimeout(loadHubs, 250); return () => clearTimeout(timer); }, [q]);
 
-  const totalVehicles = hubs.reduce((s,h)=>s+Number(h.available_shared_vehicles||0),0);
-  const totalParking = hubs.reduce((s,h)=>s+Number(h.available_personal_slots||0),0);
-  const totalChargers = hubs.reduce((s,h)=>s+Number(h.available_chargers||0),0);
+  // Search and filter: wait a moment after typing, then reload.
+  useEffect(() => {
+    const timer = setTimeout(() => loadHubs(), 250);
+    return () => clearTimeout(timer);
+  }, [q, resourceType]);
+  useEffect(() => { loadDetail(selectedId); }, [selectedId]);
+  // Status data ages (BR-27), so the page refreshes itself.
+  useEffect(() => {
+    const timer = setInterval(() => { loadHubs({ silent: true }); loadDetail(selectedId); }, REFRESH_MS);
+    return () => clearInterval(timer);
+  }, [q, resourceType, selectedId]);
+
+  const total = key => hubs.reduce((sum, h) => sum + Number(h[key] || 0), 0);
+  const capacityRows = detail ? ['Shared', 'Personal'].filter(type => detail.capacity?.[type]) : [];
 
   return <>
-    <SectionHeader eyebrow="CAMPUS OPERATIONS" title="Hub Dashboard" description="Search mobility hubs and inspect current resources, availability and simulated status." action={<button className="button secondary" onClick={loadHubs}>↻ Refresh status</button>}/>
+    <SectionHeader eyebrow="CAMPUS OPERATIONS" title="Hub Dashboard" description="Search mobility hubs and inspect current resources, availability and simulated status." action={<button className="button secondary" onClick={() => { loadHubs(); loadDetail(selectedId); }}>↻ Refresh status</button>}/>
     <Feedback error={error}/>
     <div className="stat-grid three">
-      <StatCard label="Available shared vehicles" value={totalVehicles} detail="Across listed Hubs" icon="↗"/>
-      <StatCard label="Available personal slots" value={totalParking} detail="Personal parking capacity" icon="▤"/>
-      <StatCard label="Available chargers" value={totalChargers} detail="Common charging areas" icon="ϟ"/>
+      <StatCard label="Available shared vehicles" value={total('available_shared_vehicles')} detail="Across listed Hubs" icon="↗"/>
+      <StatCard label="Available personal slots" value={total('available_personal_slots')} detail="Personal parking capacity" icon="▤"/>
+      <StatCard label="Available chargers" value={total('available_chargers')} detail="Common charging areas" icon="ϟ"/>
     </div>
     <div className="toolbar card-surface">
-      <div className="search-box"><span>⌕</span><input value={q} onChange={e=>setQ(e.target.value)} placeholder="Search by Hub name, code or location"/></div>
-      <select value={resourceType} onChange={e=>setResourceType(e.target.value)}><option value="">All resources</option><option value="shared">Shared vehicles</option><option value="parking">Personal parking</option><option value="charger">Chargers</option></select>
+      <div className="search-box"><span>⌕</span><input value={q} onChange={e => setQ(e.target.value)} placeholder="Search by Hub name, code or location" aria-label="Search Hubs"/></div>
+      <select value={resourceType} onChange={e => setResourceType(e.target.value)} aria-label="Resource filter">
+        <option value="">All resources</option>
+        <option value="shared">Shared vehicles to book</option>
+        <option value="return">Free Shared slots (return)</option>
+        <option value="parking">Personal parking</option>
+        <option value="charger">Chargers</option>
+      </select>
     </div>
     <div className="hub-layout">
       <div className="hub-list">
         <div className="subsection-title"><strong>Mobility Hubs</strong><span>{hubs.length} locations</span></div>
         {loading ? <div className="loading-block">Loading Hubs…</div> : hubs.length === 0 ? <EmptyState title="No matching Hubs" description="Try changing your search or resource filter."/> : hubs.map(hub =>
-          <button key={hub.id} className={`hub-card ${selectedId===hub.id?'selected':''}`} onClick={()=>setSelectedId(hub.id)}>
-            <div className="hub-card-top"><span className="hub-code">{hub.code}</span><StatusBadge value={hub.statusFreshness}/></div>
-            <strong>{hub.name}</strong><span className="hub-location">⌖ {hub.location}</span>
+          <button key={hub.id} className={`hub-card ${selectedId === hub.id ? 'selected' : ''}`} onClick={() => setSelectedId(hub.id)}>
+            <div className="hub-card-top"><span className="hub-code">{hub.code}</span><span className="badge-group"><StatusBadge value={hub.open_now ? 'Open now' : 'Closed'}/><StatusBadge value={hub.statusFreshness}/></span></div>
+            <strong>{hub.name}</strong><span className="hub-location">⌖ {hub.location} · {hub.open_time}–{hub.close_time}</span>
             <div className="hub-mini-metrics"><span><b>{hub.available_shared_vehicles}</b> vehicles</span><span><b>{hub.available_personal_slots}</b> parking</span><span><b>{hub.available_chargers}</b> chargers</span></div>
             {hub.warnings?.length > 0 && <div className="warning-line">⚠ {hub.warnings.join(' · ')}</div>}
           </button>
@@ -63,24 +80,40 @@ export default function HubDashboard() {
       </div>
       <div className="hub-detail card-surface">
         {!detail ? <EmptyState title="Select a Hub" description="Select a location to inspect its live and simulated resource status."/> : <>
-          <div className="detail-heading"><div><span className="hub-code">{detail.code}</span><h3>{detail.name}</h3><p>{detail.location} · Operating hours {detail.open_time}–{detail.close_time}</p></div><StatusBadge value={detail.statusFreshness}/></div>
-          <div className="detail-status-banner"><div><span className="status-dot"/> Sensor status: <strong>{detail.statusFreshness}</strong></div><span>Last refresh: {new Date(detail.sensor_updated_at).toLocaleTimeString()}</span></div>
+          <div className="detail-heading"><div><span className="hub-code">{detail.code}</span><h3>{detail.name}</h3><p>{detail.location} · Operating hours {detail.open_time}–{detail.close_time}</p></div><span className="badge-group"><StatusBadge value={detail.open_now ? 'Open now' : 'Closed'}/><StatusBadge value={detail.statusFreshness}/></span></div>
+          <div className="detail-status-banner"><div><span className="status-dot"/> Sensor status: <strong>{detail.statusFreshness}</strong></div><span>Last refresh: {fmtTime(detail.sensor_updated_at)}</span></div>
+          {detail.statusFreshness === 'Stale' && <div className="feedback is-warning">This status is older than 2 minutes. Counts below are not confirmed (BR-27).</div>}
+          {!detail.open_now && <div className="feedback is-info">This Hub is closed. New bookings and reservations are accepted only during {detail.open_time}–{detail.close_time}; returns are accepted at any time.</div>}
           <div className="resource-grid">
             <div className="resource-tile"><span>Shared vehicles</span><strong>{detail.availableSharedVehicles}</strong><small>Available for booking</small></div>
             <div className="resource-tile"><span>Shared slots</span><strong>{detail.availableSharedSlots}</strong><small>Free return spaces</small></div>
             <div className="resource-tile"><span>Personal slots</span><strong>{detail.availablePersonalSlots}</strong><small>Free parking spaces</small></div>
             <div className="resource-tile"><span>Charging queue</span><strong>{detail.queue.length}</strong><small>Queued, assigned or charging</small></div>
           </div>
-          <div className="detail-section"><div className="subsection-title"><strong>Parking capacity by slot type</strong></div>
-            <div className="table-wrap"><table><thead><tr><th>Slot type</th><th>Total</th><th>Available</th><th>Occupied</th><th>Reserved</th></tr></thead><tbody>
-              {detail.slotSummary.map(row=><tr key={row.slot_type}><td>{row.slot_type}</td><td>{row.total}</td><td>{row.available}</td><td>{row.occupied}</td><td>{row.reserved}</td></tr>)}
+          <div className="detail-section"><div className="subsection-title"><strong>Parking capacity by slot type</strong><span>Warning from 80%, critical from 95%</span></div>
+            <div className="capacity-list">{capacityRows.map(type => { const c = detail.capacity[type]; return <div className="capacity-row" key={type}>
+              <div><strong>{type}</strong><small>{c.available} free of {c.usable} usable</small></div>
+              <div className="level-track"><i className={c.level.toLowerCase()} style={{ width: `${Math.min(100, c.occupancyPercent)}%` }}/></div>
+              <span><b>{c.occupancyPercent}%</b> <StatusBadge value={c.level}/></span>
+            </div>; })}</div>
+            <div className="table-wrap"><table><thead><tr><th>Slot type</th><th className="num">Total</th><th className="num">Available</th><th className="num">Occupied</th><th className="num">Reserved</th></tr></thead><tbody>
+              {detail.slotSummary.map(row => <tr key={row.slot_type}><td>{row.slot_type}</td><td className="num">{row.total}</td><td className="num">{row.available}</td><td className="num">{row.occupied}</td><td className="num">{row.reserved}</td></tr>)}
             </tbody></table></div>
           </div>
           <div className="detail-section"><div className="subsection-title"><strong>Chargers and power</strong><span>{detail.activePowerKw} / {detail.powerLimitKw} kW</span></div>
-            <div className="power-track"><span style={{width:`${Math.min(100,detail.powerUtilizationPercent)}%`}}/></div>
-            <div className="charger-list">{detail.chargers.map(ch=><div className="charger-row" key={ch.id}><span>{ch.code}</span><span>{ch.plate || 'No vehicle assigned'}</span><StatusBadge value={ch.status}/></div>)}</div>
+            <div className="power-track"><span style={{ width: `${Math.min(100, detail.powerUtilizationPercent)}%` }}/></div>
+            <div className="charger-list">{detail.chargers.map(ch => <div className="charger-row" key={ch.id}><span>{ch.code}<small>{ch.power_kw} kW</small></span><span>{ch.plate || 'No vehicle assigned'}</span><StatusBadge value={ch.status}/></div>)}</div>
           </div>
-          {detail.warnings?.length > 0 && <div className="feedback is-warning">{detail.warnings.join(' · ')}</div>}
+          <div className="detail-section"><div className="subsection-title"><strong>Charging queue</strong><span>In scheduler order · waiting times are estimates</span></div>
+            {detail.queue.length === 0 ? <EmptyState title="Queue is empty" description="No request is waiting for a charger at this Hub."/> : <div className="table-wrap"><table>
+              <thead><tr><th>#</th><th>Vehicle</th><th>Priority</th><th className="num">Battery</th><th>Status</th><th className="num">Est. wait</th></tr></thead>
+              <tbody>{detail.queue.map((r, index) => <tr key={r.id}><td>{index + 1}</td><td><strong>{r.plate || 'Another student’s vehicle'}</strong><small>{r.kind === 'shared' ? 'Shared · automatic' : 'Personal'}</small></td>
+                <td>{r.priority_class ? <StatusBadge value={`Class ${r.priority_class}`}/> : '—'}<small>score {Number(r.priority_score || 0).toFixed(1)}</small></td>
+                <td className="num">{r.battery_level == null ? '—' : `${r.battery_level}%`}</td><td><StatusBadge value={r.status}/></td>
+                <td className="num">{r.estimated_wait_minutes == null ? '—' : `${r.estimated_wait_minutes} min`}</td></tr>)}</tbody>
+            </table></div>}
+          </div>
+          {detail.warnings?.length > 0 && <div className="feedback is-warning section-gap-small">{detail.warnings.join(' · ')}</div>}
         </>}
       </div>
     </div>
