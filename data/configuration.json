@@ -1,24 +1,38 @@
 {
+  "valueStatus": "Blocks booking, parking, thresholds and status.staleAfterMinutes, and the two charging limits personalRequestsPerVehiclePerDay and personalConnectWindowMinutes, follow Submission #1. charging.scheduler and charging.targetBatteryPercent are PROPOSED VALUES from the Technical Design Document (sections 2.2 and 2.3) that the group has not approved. demoData is mock data for the classroom demonstration. Every value below is read by the server (server/src/config.js); an invalid value stops the server at start with a message.",
+
   "operatingHours": { "open": "05:00", "close": "23:00" },
-  "booking": { "pickupHoldMinutes": 15, "minimumBatteryToBookPercent": 20 },
-  "parking": { "arrivalGraceMinutes": 15, "reminderBeforeEndMinutes": 10, "overstayGraceMinutes": 15, "sharedReturnReservePercent": 10 },
+
+  "booking": { "pickupHoldMinutes": 15, "minimumBatteryToBookPercent": 20, "maxTripHours": 3 },
+
+  "parking": { "arrivalGraceMinutes": 15, "overstayGraceMinutes": 15, "sharedReturnReservePercent": 10 },
+
+  "thresholds": {
+    "parkingWarningPercent": 80,
+    "parkingCriticalPercent": 95,
+    "chargerUtilizationWarningPercent": 80,
+    "sharedVehicleShortagePercent": 20
+  },
+
   "charging": {
     "targetBatteryPercent": 90,
     "personalRequestsPerVehiclePerDay": 2,
     "personalConnectWindowMinutes": 15,
-    "schedulerIntervalMinutes": null,
-    "demoEstimatedSessionMinutes": 45,
-    "schedulerWeights": { "batteryLevel": 1, "nextRequiredUsageTime": 1, "waitingDuration": 1, "hubPowerLimit": 1 },
-    "demoAssumptions": {
-      "weightsAreApproved": false,
+    "scheduler": {
+      "weights": { "need": 0.5, "urgency": 0.3, "waiting": 0.2 },
+      "classH": { "batteryBelowPercent": 10, "usageWithinMinutes": 60 },
+      "urgencyHorizonMinutes": 240,
+      "waitingDivisorMinutes": 3,
       "estimatedSessionMinutes": 45,
-      "note": "Equal weights and a 45-minute estimation window are illustrative MVP defaults only. Group approval is still required by BR-21 and the estimate is not a guarantee. The Hub Power Limit is seeded per Hub as demo data. No replacement threshold or maximum session duration is assumed."
+      "note": "Proposed Values (Technical Design Document 2.2). The estimated session length only feeds the queue-time estimate, which is not a guarantee (BR-43). No replacement threshold or maximum session duration is applied. The Hub Power Limit is a capacity limit, not a weight."
     }
   },
+
   "status": { "staleAfterMinutes": 2, "refreshIntervalSeconds": 60 },
+
   "demoData": {
-    "note": "Seed values for the classroom demonstration; they are not approved project operating parameters unless separately confirmed by the group.",
-    "seedHubPowerLimitKw": 30,
+    "note": "Seed values for the classroom demonstration; they are not approved operating parameters. The Central Hub limit equals one charger so that the Hub Power Limit rule is visible in the demo.",
+    "seedHubPowerLimitsKw": { "hub-central": 7.2, "hub-engineering": 14.4, "hub-library": 14.4 },
     "seedChargerPowerKw": 7.2
   }
 }
