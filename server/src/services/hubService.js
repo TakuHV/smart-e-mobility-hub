@@ -1,26 +1,21 @@
-import { db } from '../database/db.js';
+import { db, nowIso } from '../database/db.js';
 import { inHubOperatingHours } from './commonService.js';
 import { rankQueue } from './chargingService.js';
 
-// BR-27: status data older than 2 minutes is Stale.
-const STALE_AFTER_MS = 2 * 60 * 1000;
-// BR-26 default thresholds. A per-Hub override (UC-016) is not read in the MVP.
-const WARNING_RATIO = 0.8;
-const CRITICAL_RATIO = 0.95;
-const CHARGER_UTILIZATION_RATIO = 0.8;
-const SHORTAGE_RATIO = 0.2;
+import { now as clockNow } from '../clock.js';
+import { config } from '../config.js';
 // BR-28: these resources are excluded from availability and capacity.
 const UNUSABLE_STATUSES = new Set(['Out of Service', 'Connection Lost', 'Status Unknown']);
 const IN_USE_CHARGER_STATUSES = new Set(['Assigned', 'Charging', 'Awaiting Removal']);
 
 function isFresh(timestamp) {
-  const age = Date.now() - Date.parse(timestamp);
-  return Number.isFinite(age) && age <= STALE_AFTER_MS;
+  const age = clockNow() - Date.parse(timestamp);
+  return Number.isFinite(age) && age <= (config.status.staleAfterMinutes * 60000);
 }
 
 function levelOf(ratio) {
-  if (ratio >= CRITICAL_RATIO) return 'Critical';
-  if (ratio >= WARNING_RATIO) return 'Warning';
+  if (ratio >= (config.thresholds.parkingCriticalPercent / 100)) return 'Critical';
+  if (ratio >= (config.thresholds.parkingWarningPercent / 100)) return 'Warning';
   return 'Normal';
 }
 
@@ -51,16 +46,16 @@ function summarizeHub(hub) {
   const chargersInUse = chargerRows.filter(r => IN_USE_CHARGER_STATUSES.has(r.status)).reduce((sum, r) => sum + r.n, 0);
 
   const queued = db.prepare(`SELECT estimated_start_at FROM charging_requests WHERE hub_id=? AND status='Queued'`).all(hub.id);
-  const waits = queued.map(r => Math.max(0, Math.round((Date.parse(r.estimated_start_at) - Date.now()) / 60000))).filter(Number.isFinite);
+  const waits = queued.map(r => Math.max(0, Math.round((Date.parse(r.estimated_start_at) - clockNow()) / 60000))).filter(Number.isFinite);
 
   // Flags in the same wording as before.
   const warnings = [];
   const parkingRatio = Math.max(...['Shared', 'Personal'].map(t => (capacity[t].usable ? (capacity[t].usable - capacity[t].available) / capacity[t].usable : 0)));
-  if (parkingRatio >= CRITICAL_RATIO) warnings.push('Critical parking capacity');
-  else if (parkingRatio >= WARNING_RATIO) warnings.push('Warning parking capacity');
-  if (chargersUsable && chargersInUse / chargersUsable >= CHARGER_UTILIZATION_RATIO) warnings.push('High charger utilization');
+  if (parkingRatio >= (config.thresholds.parkingCriticalPercent / 100)) warnings.push('Critical parking capacity');
+  else if (parkingRatio >= (config.thresholds.parkingWarningPercent / 100)) warnings.push('Warning parking capacity');
+  if (chargersUsable && chargersInUse / chargersUsable >= (config.thresholds.chargerUtilizationWarningPercent / 100)) warnings.push('High charger utilization');
   // The Hub's shared-vehicle quota is approximated by the shared vehicles currently at the Hub.
-  if (sharedTotal && sharedAvailable / sharedTotal <= SHORTAGE_RATIO) warnings.push('Shared vehicle shortage');
+  if (sharedTotal && sharedAvailable / sharedTotal <= (config.thresholds.sharedVehicleShortagePercent / 100)) warnings.push('Shared vehicle shortage');
 
   return {
     capacity, warnings,
@@ -80,7 +75,7 @@ export function listHubs({ q = '', resourceType = '' } = {}) {
   const hubs = db.prepare(`SELECT h.* FROM hubs h
     WHERE h.name LIKE ? ESCAPE '\\' OR h.location LIKE ? ESCAPE '\\' OR h.code LIKE ? ESCAPE '\\'
     ORDER BY h.name`).all(search, search, search);
-  const nowIsoText = new Date().toISOString();
+  const nowIsoText = nowIso();
   return hubs.map(hub => {
     const s = summarizeHub(hub);
     const fresh = isFresh(hub.sensor_updated_at);
@@ -154,7 +149,7 @@ export function getHubStatus(hubId, user = null) {
         priority_score: r.status === 'Queued' && live ? live.score : r.priority_score,
         priority_class: live?.cls ?? null,
         estimated_wait_minutes: r.status === 'Queued' && r.estimated_start_at
-          ? Math.max(0, Math.round((Date.parse(r.estimated_start_at) - Date.now()) / 60000)) : null
+          ? Math.max(0, Math.round((Date.parse(r.estimated_start_at) - clockNow()) / 60000)) : null
       };
       return mayShow({ kind: r.kind, owner_id })
         ? entry
@@ -167,9 +162,10 @@ export function getHubStatus(hubId, user = null) {
   return {
     ...hub,
     statusFreshness: fresh ? 'Fresh' : 'Stale',                 // BR-27
+    staleAfterMinutes: config.status.staleAfterMinutes,
     slotSummary, vehicles, chargers, queue,
     capacity: s.capacity,
-    open_now: hub.status === 'Open' && inHubOperatingHours(hub, new Date().toISOString()),
+    open_now: hub.status === 'Open' && inHubOperatingHours(hub, nowIso()),
     availableSharedVehicles: s.availableSharedVehicles,
     availableSharedSlots: s.availableSharedSlots,
     availablePersonalSlots: s.availablePersonalSlots,

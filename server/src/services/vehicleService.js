@@ -1,13 +1,13 @@
 import { db, transaction, makeId, nowIso } from '../database/db.js';
 import { HttpError, requireValue, getViolationSummary, inHubOperatingHours, auditChange, addViolation } from './commonService.js';
 import { enqueueSharedVehicle } from './chargingService.js';
+import { notifyOperators } from './notificationService.js';
 
-const PICKUP_HOLD_MINUTES = 15;   // BR-11
-const MIN_BOOKING_BATTERY = 20;   // BR-10, BR-18
-const MAX_TRIP_HOURS = 3;         // BR-50
 
+import { now as clockNow } from '../clock.js';
+import { config } from '../config.js';
 export function listVehicles({ kind, hubId, user }) {
-  let sql = `SELECT v.*, h.name AS hub_name FROM vehicles v LEFT JOIN hubs h ON h.id=v.hub_id WHERE 1=1`;
+  let sql = `SELECT v.*, h.name AS hub_name FROM vehicles v LEFT JOIN hubs h ON h.id=v.hub_id WHERE v.status<>'Retired'`;
   const params = [];
   if (kind) { sql += ' AND v.kind=?'; params.push(kind); }
   if (hubId) { sql += ' AND v.hub_id=?'; params.push(hubId); }
@@ -43,15 +43,15 @@ export function createPersonalVehicle({ user, plate, vehicleType, connectorType,
 export function listBookings(user) {
   requireValue(user, 401, 'You must be logged in to view bookings.');
   const sql = `SELECT b.*, v.plate, v.battery_level, v.status AS vehicle_status,
-    h.name AS hub_name, h.location AS hub_location
-    FROM bookings b JOIN vehicles v ON v.id=b.vehicle_id JOIN hubs h ON h.id=b.hub_id
+    h.name AS hub_name, h.location AS hub_location, dh.name AS destination_hub_name
+    FROM bookings b JOIN vehicles v ON v.id=b.vehicle_id JOIN hubs h ON h.id=b.hub_id LEFT JOIN hubs dh ON dh.id=b.destination_hub_id
     ${user.role === 'Student' ? 'WHERE b.user_id=?' : ''}
     ORDER BY b.created_at DESC LIMIT 100`;
   return user.role === 'Student' ? db.prepare(sql).all(user.id) : db.prepare(sql).all();
 }
 
 // UC-005. Every state-dependent check runs inside the transaction that writes the booking (BR-08, BR-36).
-export function createBooking({ user, vehicleId }) {
+export function createBooking({ user, vehicleId, destinationHubId = null }) {
   requireValue(user?.role === 'Student', 403, 'Only students can book shared vehicles.');
   const restriction = getViolationSummary(user.id);
   requireValue(!restriction.suspended, 403,
@@ -69,20 +69,28 @@ export function createBooking({ user, vehicleId }) {
       `New bookings are accepted only during Hub operating hours: ${vehicle.open_time}–${vehicle.close_time} (BR-42).`);
     const existing = db.prepare(`SELECT id FROM bookings WHERE user_id=? AND status IN ('Confirmed','In Progress','Overdue')`).get(user.id);
     if (existing) throw new HttpError(409, 'You already have an active shared-vehicle booking (BR-09).', { bookingId: existing.id });
-    requireValue(vehicle.status === 'Available' && vehicle.battery_level >= MIN_BOOKING_BATTERY, 409,
-      `Only an Available shared vehicle with at least ${MIN_BOOKING_BATTERY}% battery can be booked (BR-10).`);
+    requireValue(vehicle.status === 'Available' && vehicle.battery_level >= config.booking.minimumBatteryToBookPercent, 409,
+      `Only an Available shared vehicle with at least ${config.booking.minimumBatteryToBookPercent}% battery can be booked (BR-10).`);
 
-    const deadline = new Date(Date.now() + PICKUP_HOLD_MINUTES * 60 * 1000).toISOString();
+    const deadline = new Date(clockNow() + config.booking.pickupHoldMinutes * 60 * 1000).toISOString();
     const reserved = db.prepare(`UPDATE vehicles SET status='Reserved', updated_at=?
-      WHERE id=? AND status='Available' AND battery_level>=?`).run(now, vehicleId, MIN_BOOKING_BATTERY);
+      WHERE id=? AND status='Available' AND battery_level>=?`).run(now, vehicleId, config.booking.minimumBatteryToBookPercent);
     requireValue(reserved.changes === 1, 409, 'Vehicle availability changed. Please select another vehicle.');
     // BR-39: the Shared slot kept for the vehicle is released when a student books it.
     db.prepare(`UPDATE parking_slots SET status='Available', current_vehicle_id=NULL, updated_at=?
       WHERE current_vehicle_id=? AND slot_type='Shared'`).run(now, vehicleId);
-    db.prepare(`INSERT INTO bookings (id,user_id,vehicle_id,hub_id,status,pickup_deadline,created_at)
-      VALUES (?,?,?,?, 'Confirmed', ?, ?)`)
-      .run(bookingId, user.id, vehicleId, vehicle.hub_id, deadline, now);
-    auditChange('Booking', bookingId, 'BOOKING_CONFIRMED', { vehicleId, pickupDeadline: deadline }, user.id);
+    if (destinationHubId) {
+      const destination = db.prepare('SELECT * FROM hubs WHERE id=?').get(destinationHubId);
+      requireValue(destination, 404, 'Destination Hub not found.');
+      requireValue(destinationHubId !== vehicle.hub_id, 400, 'Choose a different Hub from the one where you pick up the vehicle.');
+      requireValue(destination.status === 'Open', 409, 'The destination Hub is closed. Choose another Hub.');
+      const freeSlots = db.prepare(`SELECT COUNT(*) AS n FROM parking_slots WHERE hub_id=? AND slot_type='Shared' AND status='Available'`).get(destinationHubId).n;
+      requireValue(freeSlots > 0, 409, `${destination.name} has no free Shared slot right now. Choose another Hub.`);
+    }
+    db.prepare(`INSERT INTO bookings (id,user_id,vehicle_id,hub_id,status,pickup_deadline,created_at,destination_hub_id)
+      VALUES (?,?,?,?, 'Confirmed', ?, ?, ?)`)
+      .run(bookingId, user.id, vehicleId, vehicle.hub_id, deadline, now, destinationHubId || null);
+    auditChange('Booking', bookingId, 'BOOKING_CONFIRMED', { vehicleId, pickupDeadline: deadline, destinationHubId }, user.id);
   });
   return db.prepare(`SELECT b.*, v.plate, h.name AS hub_name FROM bookings b
     JOIN vehicles v ON v.id=b.vehicle_id JOIN hubs h ON h.id=b.hub_id WHERE b.id=?`).get(bookingId);
@@ -99,37 +107,41 @@ export function pickupBooking({ user, bookingId }) {
     requireValue(user?.role === 'Student' && booking.user_id === user.id, 403, 'Only the booking owner can pick up this vehicle (BR-17).');
     requireValue(booking.status === 'Confirmed', 409, 'Only a Confirmed booking can be picked up.');
 
-    if (Date.parse(booking.pickup_deadline) <= Date.now()) {
+    if (Date.parse(booking.pickup_deadline) <= clockNow()) {
       // E3: the booking is expired now, the vehicle is released and one point is recorded (BR-11, BR-52).
       // BR-57: no point when the vehicle itself failed in the meantime.
       db.prepare(`UPDATE bookings SET status='Expired' WHERE id=? AND status='Confirmed'`).run(bookingId);
       db.prepare(`UPDATE vehicles SET status='Available', updated_at=? WHERE id=? AND status='Reserved'`).run(now, booking.vehicle_id);
-      addViolation(booking.user_id, 1, 'Shared vehicle was not collected within the 15-minute pickup hold.', 'booking', bookingId,
+      addViolation(booking.user_id, 1, `Shared vehicle was not collected within the ${config.booking.pickupHoldMinutes}-minute pickup hold.`, 'booking', bookingId,
         { exemptCause: booking.vehicle_status === 'Out of Service' ? 'vehicle failure' : undefined });
       auditChange('Booking', bookingId, 'BOOKING_EXPIRED', { detectedAt: 'pickup' }, 'system');
       windowElapsed = true;
       return; // commit the expiry
     }
     requireValue(booking.vehicle_status === 'Reserved', 409, 'The reserved vehicle is not available.');
-    const started = db.prepare(`UPDATE bookings SET status='In Progress', started_at=? WHERE id=? AND status='Confirmed'`).run(now, bookingId);
+    // start_battery is the starting point of the trip's battery consumption (NI-11); without it the timer would subtract from an already reduced level.
+    const started = db.prepare(`UPDATE bookings SET status='In Progress', started_at=?,
+      start_battery=(SELECT battery_level FROM vehicles WHERE id=bookings.vehicle_id) WHERE id=? AND status='Confirmed'`).run(now, bookingId);
     requireValue(started.changes === 1, 409, 'The booking changed. Please reload and try again.');
     const inUse = db.prepare(`UPDATE vehicles SET status='In Use', updated_at=? WHERE id=? AND status='Reserved'`).run(now, booking.vehicle_id);
     requireValue(inUse.changes === 1, 409, 'The reserved vehicle is not available.');
     auditChange('Booking', bookingId, 'SHARED_VEHICLE_PICKED_UP', {}, user.id);
   });
   requireValue(!windowElapsed, 409,
-    'The 15-minute pickup window has elapsed. The booking is now Expired and one violation point was recorded (BR-11, BR-52). You may create a new booking.');
+    `The ${config.booking.pickupHoldMinutes}-minute pickup window has elapsed. The booking is now Expired and one violation point was recorded (BR-11, BR-52). You may create a new booking.`);
   return db.prepare('SELECT * FROM bookings WHERE id=?').get(bookingId);
 }
 
 // UC-007. A failed return leaves the trip active and the vehicle In Use (BR-36).
-export function returnBooking({ user, bookingId, returnSlotId, batteryLevel, reportProblem = false, problemNote = '' }) {
-  const battery = Number(batteryLevel);
-  requireValue(Number.isInteger(battery) && battery >= 0 && battery <= 100, 400, 'Battery level must be between 0 and 100.');
+// The battery level is taken from the vehicle's own simulated level (the trip timer lowers it), so the student does not type it.
+// Pass batteryLevel only to override it (tests, manual correction). Without returnSlotId the first free Shared slot of
+// hubId (or of the Hub chosen at booking) is used.
+export function returnBooking({ user, bookingId, returnSlotId, hubId, batteryLevel, reportProblem = false, problemNote = '' }) {
   const note = String(problemNote || '').trim().slice(0, 500);
   const incidentId = reportProblem ? makeId('incident') : null;
-  const lowBattery = battery < MIN_BOOKING_BATTERY;                       // BR-18
-  const nextVehicleStatus = reportProblem ? 'Out of Service' : (lowBattery ? 'Needs Charging' : 'Available');
+  let battery = null;
+  let lowBattery = false;
+  let nextVehicleStatus = null;
   let tripHours = null;
 
   transaction(() => {
@@ -140,12 +152,27 @@ export function returnBooking({ user, bookingId, returnSlotId, batteryLevel, rep
     requireValue(user?.role === 'Student' && booking.user_id === user.id, 403, 'Only the booking owner can return this vehicle.');
     requireValue(['In Progress', 'Overdue'].includes(booking.status) && booking.vehicle_status === 'In Use', 409,
       'The vehicle does not have an active trip (BR-17).');
-    const slot = db.prepare('SELECT * FROM parking_slots WHERE id=?').get(returnSlotId);
+    const rawBattery = batteryLevel === undefined || batteryLevel === null || batteryLevel === ''
+      ? db.prepare('SELECT battery_level FROM vehicles WHERE id=?').get(booking.vehicle_id).battery_level : Number(batteryLevel);
+    requireValue(Number.isFinite(rawBattery) && Number.isInteger(Math.round(rawBattery)) && rawBattery >= 0 && rawBattery <= 100, 400, 'Battery level must be between 0 and 100.');
+    battery = Math.round(rawBattery);
+    lowBattery = battery < config.booking.minimumBatteryToBookPercent;                           // BR-18
+    nextVehicleStatus = reportProblem ? 'Out of Service' : (lowBattery ? 'Needs Charging' : 'Available');
+
+    let slotId = returnSlotId;
+    if (!slotId) {
+      const targetHub = hubId || booking.destination_hub_id;
+      requireValue(targetHub, 400, 'Choose the Hub where you are returning the vehicle.');
+      const free = db.prepare(`SELECT id FROM parking_slots WHERE hub_id=? AND slot_type='Shared' AND status='Available' ORDER BY code LIMIT 1`).get(targetHub);
+      requireValue(free, 409, 'That Hub has no free Shared slot right now. Choose another Hub.');
+      slotId = free.id;
+    }
+    const slot = db.prepare('SELECT * FROM parking_slots WHERE id=?').get(slotId);
     requireValue(slot && slot.slot_type === 'Shared', 400, 'A shared vehicle must be returned to a Shared slot (BR-17, BR-38).');
     requireValue(slot.status === 'Available', 409, 'The selected Shared slot is not free. Choose another slot or Hub.');
 
     const startedMs = Date.parse(booking.started_at);
-    tripHours = Number.isFinite(startedMs) ? (Date.now() - startedMs) / 3600000 : 0;
+    tripHours = Number.isFinite(startedMs) ? (clockNow() - startedMs) / 3600000 : 0;
 
     const slotTaken = db.prepare(`UPDATE parking_slots SET status='Occupied', current_vehicle_id=?, updated_at=?
       WHERE id=? AND status='Available'`).run(booking.vehicle_id, now, slot.id);
@@ -156,19 +183,21 @@ export function returnBooking({ user, bookingId, returnSlotId, batteryLevel, rep
 
     if (reportProblem) {
       // A3: the return is recorded, an Open incident is created and the vehicle is Out of Service.
-      db.prepare(`INSERT INTO incidents (id,hub_id,vehicle_id,summary,status,created_at)
-        VALUES (?,?,?,?,'Open',?)`)
-        .run(incidentId, slot.hub_id, booking.vehicle_id, note || 'Vehicle problem reported during return.', now);
+      db.prepare(`INSERT INTO incidents (id,hub_id,vehicle_id,summary,status,created_at,category,severity,source,reported_by,updated_at)
+        VALUES (?,?,?,?,'Open',?, 'Vehicle fault','Medium','return',?,?)`)
+        .run(incidentId, slot.hub_id, booking.vehicle_id, note || 'Vehicle problem reported during return.', now, user.id, now);
+      notifyOperators({ kind: 'incident_reported', entityType: 'Incident', entityId: incidentId, severity: 'warning',
+        title: 'Problem reported at return', message: note || 'A student reported a vehicle problem while returning it.' });
       auditChange('Incident', incidentId, 'INCIDENT_OPENED', { vehicleId: booking.vehicle_id, source: 'return', bookingId }, user.id);
     }
     // A5 / BR-52: one point for a trip over 3 hours. The student can dispute it (BR-58, BR-57).
-    if (tripHours > MAX_TRIP_HOURS) {
-      addViolation(user.id, 1, 'Shared-vehicle trip exceeded the 3-hour maximum.', 'booking', bookingId);
+    if (tripHours > config.booking.maxTripHours) {
+      addViolation(user.id, 1, `Shared-vehicle trip exceeded the ${config.booking.maxTripHours}-hour maximum.`, 'booking', bookingId);
     }
     // BR-25: a returned vehicle that needs charging gets a charging request automatically.
     if (lowBattery && !reportProblem) enqueueSharedVehicle(booking.vehicle_id, slot.hub_id);
     auditChange('Booking', bookingId, 'SHARED_VEHICLE_RETURNED',
-      { returnSlotId, hubId: slot.hub_id, batteryLevel: battery, lowBattery, reportProblem, tripHours: Number(tripHours.toFixed(2)) }, user.id);
+      { returnSlotId: slot.id, hubId: slot.hub_id, batteryLevel: battery, lowBattery, reportProblem, tripHours: Number(tripHours.toFixed(2)) }, user.id);
   });
   return {
     booking: db.prepare('SELECT * FROM bookings WHERE id=?').get(bookingId),

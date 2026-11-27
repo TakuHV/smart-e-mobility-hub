@@ -1,3 +1,4 @@
+import { ensureDemoAccounts } from '../services/authService.js';
 import { resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { db, transaction, nowIso } from './db.js';
@@ -16,13 +17,15 @@ export function seedDatabase() {
 
   const now = nowIso();
   transaction(() => {
-    const addUser = db.prepare('INSERT INTO users (id, full_name, role, created_at) VALUES (?, ?, ?, ?)');
+    const addUser = db.prepare('INSERT OR IGNORE INTO users (id, full_name, role, created_at) VALUES (?, ?, ?, ?)');
     [
       ['student-demo', 'Demo Student', 'Student'],
       ['operator-demo', 'Demo Operator', 'Operator'],
       ['simulation-demo', 'Demo Simulation Operator', 'Simulation Operator'],
       ['admin-demo', 'Demo Admin', 'Admin']
     ].forEach(user => addUser.run(...user, now));
+
+    ensureDemoAccounts();
 
     const addHub = db.prepare(`INSERT INTO hubs
       (id, code, name, location, open_time, close_time, power_limit_kw, status, sensor_updated_at)

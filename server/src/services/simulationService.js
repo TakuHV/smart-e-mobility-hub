@@ -1,18 +1,14 @@
 import { db, transaction, makeId, nowIso } from '../database/db.js';
 import { HttpError, requireValue, auditChange, parseJson } from './commonService.js';
 
+import { config } from '../config.js';
 /*
  * What-if simulation (UC-023, UC-024, UC-025; BR-32, BR-33, BR-34).
  * A run reads a baseline snapshot and writes ONLY simulation_runs, recommendations, recommendation_handoffs
  * and audit rows. It never changes bookings, vehicles, slots, chargers or charging requests.
  */
 
-// BR-26 default thresholds, BR-40 shared-slot reserve. A per-Hub override (UC-016) is not read in the MVP.
-const WARNING_PERCENT = 80;
-const CRITICAL_PERCENT = 95;
-const SHARED_FREE_RESERVE_PERCENT = 10;
 const UNUSABLE_STATUSES = new Set(['Out of Service', 'Status Unknown', 'Connection Lost']); // BR-28
-const DEFAULT_SESSION_MINUTES = 45; // scenario assumption only (see Technical Design Document: Proposed Value)
 
 const scenarioLabels = {
   parking_surge: 'Sudden increase of arrivals at a Hub',
@@ -41,8 +37,8 @@ function slotStats(slots, type, extra = 0) {
 }
 
 function levelOf(percent) {
-  if (percent >= CRITICAL_PERCENT) return 'Critical';
-  if (percent >= WARNING_PERCENT) return 'Warning';
+  if (percent >= config.thresholds.parkingCriticalPercent) return 'Critical';
+  if (percent >= config.thresholds.parkingWarningPercent) return 'Warning';
   return 'Normal';
 }
 
@@ -61,7 +57,7 @@ function chargingCapacity(chargers, powerLimitKw) {
 }
 
 function reserveSlots(slotType, total) {
-  return slotType === 'Shared' ? Math.ceil(total * SHARED_FREE_RESERVE_PERCENT / 100) : 0; // BR-40
+  return slotType === 'Shared' ? Math.ceil(total * config.parking.sharedReturnReservePercent / 100) : 0; // BR-40
 }
 
 // A Hub that can receive vehicles or users: open, enough free slots (BR-40 reserve kept) and below warning level (BR-31).
@@ -71,7 +67,7 @@ function pickDestinationHub(network, sourceHubId, slotType, needed) {
     .map(h => ({ hub: h, stats: h.slots[slotType] }))
     .filter(({ stats }) => stats.total > 0
       && stats.free - needed >= reserveSlots(slotType, stats.total)
-      && Math.round(((stats.occupied + needed) / stats.total) * 100) < WARNING_PERCENT)
+      && Math.round(((stats.occupied + needed) / stats.total) * 100) < config.thresholds.parkingWarningPercent)
     .sort((a, b) => a.stats.percent - b.stats.percent || String(a.hub.id).localeCompare(String(b.hub.id)))[0]?.hub ?? null;
 }
 
@@ -126,7 +122,7 @@ function readParameters(scenarioType, input, baseline) {
       requireValue(usable > 0, 400, 'This Hub has no usable charger to put out of service.');
       parameters.chargerOutageCount = readInteger(input.chargerOutageCount, 'chargerOutageCount', 1, usable, 1);
     }
-    parameters.estimatedSessionMinutes = readInteger(input.estimatedSessionMinutes, 'estimatedSessionMinutes', 10, 180, DEFAULT_SESSION_MINUTES);
+    parameters.estimatedSessionMinutes = readInteger(input.estimatedSessionMinutes, 'estimatedSessionMinutes', 10, 180, config.charging.scheduler.estimatedSessionMinutes);
     if (input.powerLimitKw !== undefined && input.powerLimitKw !== null && input.powerLimitKw !== '') {
       const limit = Number(input.powerLimitKw);
       requireValue(Number.isFinite(limit) && limit > 0 && limit <= 1000, 400, 'powerLimitKw must be a number above 0 and at most 1000.');
@@ -160,7 +156,7 @@ function simulate(scenarioType, baseline, parameters) {
   const projectedCapacity = chargingCapacity(remaining, powerLimitKw).concurrent;
   const extraRequests = scenarioType === 'charging_demand' ? demand : 0;
   const projectedQueue = baseline.chargingQueue.length + extraRequests;
-  const sessionMinutes = parameters.estimatedSessionMinutes ?? DEFAULT_SESSION_MINUTES;
+  const sessionMinutes = parameters.estimatedSessionMinutes ?? config.charging.scheduler.estimatedSessionMinutes;
   const waitingRequests = Math.max(0, projectedQueue - projectedCapacity);
   const longestWait = waitingRequests === 0 ? 0 : (projectedCapacity > 0 ? Math.ceil(waitingRequests / projectedCapacity) * sessionMinutes : null);
 
@@ -337,7 +333,7 @@ function validateRecommendationNow(type, payload) {
   if (!openHub(payload.targetHubId)) return 'The target Hub is no longer open.';
   if (type === 'REDIRECT_USERS') {
     const stats = liveSlotStats(payload.targetHubId, payload.slotType || 'Personal');
-    return stats.free > 0 && stats.percent < WARNING_PERCENT
+    return stats.free > 0 && stats.percent < config.thresholds.parkingWarningPercent
       ? null : 'The target Hub is now at warning level or has no free capacity (BR-31).';
   }
   if (type === 'REDISTRIBUTE_VEHICLES') {

@@ -5,7 +5,7 @@ const palette = {
   Declined: 'red', Expired: 'red', Cancelled: 'muted', 'Out of Service': 'red', Stale: 'red', Fresh: 'green',
   Requested: 'amber', Open: 'red', Parked: 'green', Overdue: 'red', Occupied: 'muted', 'In Use': 'blue',
   Normal: 'green', Warning: 'amber', Critical: 'red', Pending: 'amber', Simulated: 'violet',
-  'Open now': 'green', Closed: 'red', 'Class H': 'red', 'Class L': 'muted'
+  'In Transfer': 'violet', Retired: 'muted', Resolved: 'green', High: 'red', Medium: 'amber', Low: 'muted', 'Open now': 'green', Closed: 'red', 'Class H': 'red', 'Class L': 'muted'
 };
 
 export default function StatusBadge({ value }) {
