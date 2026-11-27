@@ -29,6 +29,24 @@ export const Choice = ({ icon, title, hint, right, chosen, disabled, onClick }) 
 export const Chips = ({ options, value, onChange }) =>
   <div className="chip-row">{options.map(o => <button type="button" key={o.value} className={`chip ${value === o.value ? 'chosen' : ''}`} onClick={() => onChange(o.value)}>{o.label}</button>)}</div>;
 
+// Hour and minute typed as numbers (instead of fixed choices). Values are kept as text so typing feels natural;
+// non-digits are dropped, and the value is limited to its maximum.
+const digits = (value, max) => { const t = String(value).replace(/\D/g, '').slice(0, 2); return t !== '' && Number(t) > max ? String(max) : t; };
+export const toInt = value => (value === '' || value == null ? NaN : Number(value));
+export function TimeFields({ hour, minute, onHour, onMinute, maxHour = 23, hourLabel = 'hours', minuteLabel = 'minutes', clock = false }) {
+  const pad = (value, set) => () => value !== '' && set(String(Number(value)).padStart(clock ? 2 : 1, '0'));
+  return <div className="time-fields">
+    <label><input inputMode="numeric" autoComplete="off" value={hour} placeholder={clock ? 'HH' : '0'} aria-label={hourLabel}
+      onChange={e => onHour(digits(e.target.value, maxHour))} onBlur={pad(hour, onHour)} onFocus={e => e.target.select()}/><small>{hourLabel}</small></label>
+    <span className="time-sep">{clock ? ':' : ''}</span>
+    <label><input inputMode="numeric" autoComplete="off" value={minute} placeholder={clock ? 'MM' : '0'} aria-label={minuteLabel}
+      onChange={e => onMinute(digits(e.target.value, 59))} onBlur={pad(minute, onMinute)} onFocus={e => e.target.select()}/><small>{minuteLabel}</small></label>
+  </div>;
+}
+// Today at hour:minute on the (demo) clock, in the device's local time.
+export const todayAt = (nowMs, hour, minute) => { const d = new Date(nowMs); d.setHours(hour, minute, 0, 0); return d.getTime(); };
+export const clockText = ms => new Date(ms).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
+
 // Runs `loader` now and again every `seconds` and after demo-clock changes. `loader(silent)` should return nothing.
 export function useLoad(loader, seconds = 15) {
   const ref = useRef(loader);

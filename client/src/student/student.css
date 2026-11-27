@@ -92,3 +92,11 @@
 .note-item small { color: var(--muted); }
 .stu .badge { font-size: .7em; }
 @media (max-width: 420px) { .stu-col { padding-left: 14px; padding-right: 14px; } }
+
+/* Hour and minute typed by the student */
+.time-fields { display: flex; align-items: flex-start; gap: 10px; }
+.time-fields label { flex: 1; align-items: center; text-align: center; }
+.time-fields input { width: 100%; min-height: 64px; border: 2px solid var(--line); border-radius: 18px; font: inherit; font-size: 28px; font-weight: 700; text-align: center; background: #fff; }
+.time-fields input:focus { outline: none; border-color: var(--primary); }
+.time-fields small { color: var(--muted); font-weight: 600; }
+.time-sep { font-size: 32px; font-weight: 700; line-height: 64px; }

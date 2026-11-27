@@ -2,10 +2,10 @@ import { useEffect, useState } from 'react';
 import { api, query } from '../api';
 import { virtualNow, useNow } from '../clock';
 import { Countdown } from '../components/Timers';
-import { BackHeader, Choice, Chips, useLoad, useAction, hubHint } from './ui';
+import { BackHeader, Choice, Chips, TimeFields, toInt, useLoad, useAction, hubHint } from './ui';
 
-const START = [{ value: 2, label: 'Now' }, { value: 30, label: 'In 30 min' }, { value: 60, label: 'In 1 hour' }];
-const LENGTH = [{ value: 60, label: '1 hour' }, { value: 120, label: '2 hours' }, { value: 180, label: '3 hours' }, { value: 240, label: '4 hours' }];
+const pad2 = n => String(n).padStart(2, '0');
+const ARRIVE = [{ value: 0, label: 'Now' }, { value: 5, label: 'In 5 min' }, { value: 15, label: 'In 15 min' }, { value: 30, label: 'In 30 min' }];
 const fmt = v => new Date(v).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 
 export default function ParkFlow({ onClose }) {
@@ -16,8 +16,10 @@ export default function ParkFlow({ onClose }) {
   const [step, setStep] = useState(1);
   const [vehicleId, setVehicleId] = useState('');
   const [hubId, setHubId] = useState('');
-  const [startIn, setStartIn] = useState(2);
-  const [length, setLength] = useState(120);
+  // Arrival is one of four quick choices (minutes from now); the length of the stay is typed as hours + minutes.
+  const [arrChoice, setArrChoice] = useState(0);
+  const [lenH, setLenH] = useState('2');
+  const [lenM, setLenM] = useState('0');
   const [slot, setSlot] = useState(null);
   const [fixed, setFixed] = useState(null); // the chosen period, fixed when the student moves to the last step
   const [plate, setPlate] = useState('');
@@ -34,7 +36,17 @@ export default function ParkFlow({ onClose }) {
   }, 10);
 
   const vehicle = data?.vehicles.find(v => v.id === vehicleId);
-  const period = () => { const s = virtualNow() + startIn * 60000; return { startAt: new Date(s).toISOString(), endAt: new Date(s + length * 60000).toISOString() }; };
+  // "Now" starts in 2 minutes, so the spot is not already late when it is created.
+  const typed = () => {
+    const lh = toInt(lenH || '0'), lm = toInt(lenM || '0');
+    if ([lh, lm].some(Number.isNaN)) return { error: 'Please type the hours and the minutes.' };
+    const stay = lh * 60 + lm;
+    if (stay < 15) return { error: 'Please stay at least 15 minutes.' };
+    if (stay > 24 * 60) return { error: 'The stay is too long. Please type at most 24 hours.' };
+    const start = virtualNow() + Math.max(arrChoice, 2) * 60000;
+    return { startAt: new Date(start).toISOString(), endAt: new Date(start + stay * 60000).toISOString() };
+  };
+  const period = () => { const t = typed(); return { startAt: t.startAt, endAt: t.endAt }; };
 
   // Step 4: find a free Personal slot for the chosen period.
   useEffect(() => {
@@ -81,11 +93,13 @@ export default function ParkFlow({ onClose }) {
       {step === 2 && <div className="choice-list">
         {data.hubs.map(h => <Choice key={h.id} icon="📍" title={h.name} hint={hubHint(h)} disabled={!h.open_now} chosen={hubId === h.id} onClick={() => { setHubId(h.id); setStep(3); }}/>)}
       </div>}
-      {step === 3 && <>
-        <div className="stu-card"><b>When do you arrive?</b><Chips value={startIn} onChange={setStartIn} options={START}/></div>
-        <div className="stu-card"><b>How long will you stay?</b><Chips value={length} onChange={setLength} options={LENGTH}/></div>
-        <button className="stu-btn" onClick={() => { setFixed(period()); setStep(4); }}>Next</button>
-      </>}
+      {step === 3 && (() => { const t = typed(); return <>
+        <div className="stu-card"><b>What time do you arrive?</b>
+          <Chips value={arrChoice} options={ARRIVE} onChange={setArrChoice}/></div>
+        <div className="stu-card"><b>How long will you stay?</b><TimeFields hour={lenH} minute={lenM} onHour={setLenH} onMinute={setLenM} maxHour={24} hourLabel="hours" minuteLabel="minutes"/></div>
+        {t.error && <div className="stu-error">{t.error}</div>}
+        <button className="stu-btn" disabled={!!t.error} onClick={() => { setFixed(period()); setStep(4); }}>Next</button>
+      </>; })()}
       {step === 4 && vehicle && <>
         <div className="stu-card">
           <div><small>Vehicle</small><h2>{vehicle.plate}</h2></div>

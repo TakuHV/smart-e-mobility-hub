@@ -55,8 +55,8 @@ export function seedDatabase() {
         addSlot.run(`${hubId}-S${i}`, hubId, slotCode('S', i), 'Shared', supported, 'Available', now);
         addSlot.run(`${hubId}-P${i}`, hubId, slotCode('P', i), 'Personal', supported, 'Available', now);
       }
+      for (let i = 1; i <= 5; i++) addSlot.run(`${hubId}-H${i}`, hubId, slotCode('H', i), 'Holding', supported, 'Available', now);
       for (let i = 1; i <= 2; i++) {
-        addSlot.run(`${hubId}-H${i}`, hubId, slotCode('H', i), 'Holding', supported, 'Available', now);
         addCharger.run(`${hubId}-CH${i}`, hubId, `CH-${i}`, JSON.stringify(['Type2', 'GB/T']), CHARGER_POWER_KW, now);
       }
       for (let i = 1; i <= 3; i++) {

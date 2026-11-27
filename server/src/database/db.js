@@ -53,7 +53,12 @@ for (const [table, column, definition] of [
   ['bookings', 'destination_hub_id', 'TEXT REFERENCES hubs(id)'],
   ['parking_reservations', 'overstay_flagged_at', 'TEXT'],
   ['charging_requests', 'start_battery', 'INTEGER'],
-  ['charging_requests', 'overstay_flagged_at', 'TEXT']
+  ['charging_requests', 'overstay_flagged_at', 'TEXT'],
+  ['charging_requests', 'available_from', 'TEXT'],
+  ['bookings', 'pickup_from', 'TEXT'],
+  ['move_vehicle_requests', 'auto_send_at', 'TEXT'],
+  ['move_vehicle_requests', 'sent_at', 'TEXT'],
+  ['move_vehicle_requests', 'destination', "TEXT NOT NULL DEFAULT 'Slot'"]
 ]) addColumnIfMissing(table, column, definition);
 
 /*

@@ -14,17 +14,26 @@ export const configPath = process.env.SMART_EMOBILITY_CONFIG
 
 const defaults = {
   operatingHours: { open: '05:00', close: '23:00' },
-  booking: { pickupHoldMinutes: 15, minimumBatteryToBookPercent: 20, maxTripHours: 3 },
-  parking: { arrivalGraceMinutes: 15, overstayGraceMinutes: 15, sharedReturnReservePercent: 10 },
+  booking: { pickupHoldMinutes: 15, minimumBatteryToBookPercent: 30, maxTripHours: 3 },
+  parking: { arrivalGraceMinutes: 15, overstayGraceMinutes: 15, sharedReturnReservePercent: 10, holdingFreeReservePercent: 40 },
   thresholds: { parkingWarningPercent: 80, parkingCriticalPercent: 95, chargerUtilizationWarningPercent: 80, sharedVehicleShortagePercent: 20 },
   charging: {
-    targetBatteryPercent: 90,
+    targetBatteryPercent: 100,
+    pickupNoticePercent: 90,          // the owner is told that the vehicle is ready to be collected (charging continues to the target)
+    pickupGraceMinutes: 5,            // after the target is reached; then the vehicle is moved to Holding
+    moveAutoSendSeconds: 15,          // a Move Vehicle Request is sent by itself after this time; an Operator can stop it
+    fieldMoveSeconds: 30,             // simulated time Field Staff need to move a vehicle
+    returnLeadMinutes: 2,             // a booked shared vehicle leaves its charger this long before the pickup time
+    stopCooldownMinutes: 15,          // a stopped automatic move is not planned again for this long
     personalRequestsPerVehiclePerDay: 2,
     personalConnectWindowMinutes: 15,
     maxSessionMinutes: null,
     scheduler: {
       weights: { need: 0.5, urgency: 0.3, waiting: 0.2 },
-      classH: { batteryBelowPercent: 10, usageWithinMinutes: 60 },
+      classH: { batteryBelowPercent: 10, slackWithinMinutes: 0 },
+      hopelessSlackMinutes: -30,        // slack below this: the vehicle cannot be ready in time any more (class X, ranked behind class L)
+      preemptMarginPoints: 10,          // a personal request displaces a shared vehicle only if its score is higher by this much (same class)
+      preemptMaxBatteryPercent: 90,     // a shared vehicle at or above this level is never displaced
       urgencyHorizonMinutes: 240,
       waitingDivisorMinutes: 3,
       estimatedSessionMinutes: 45
@@ -36,7 +45,9 @@ const defaults = {
     capacityKwhByVehicleType: { Motorcycle: 3.5, Car: 24 },
     defaultCapacityKwh: 10,
     tripConsumptionKwByVehicleType: { Motorcycle: 1.2, Car: 6 },
-    defaultTripConsumptionKw: 3
+    defaultTripConsumptionKw: 3,
+    tripDropPercent: 20,              // average battery used by a trip between two Hubs
+    tripDropMinutes: 20               // the drop is spread over this time
   },
   demoData: {
     seedHubPowerLimitsKw: { 'hub-central': 7.2, 'hub-engineering': 14.4, 'hub-library': 14.4 },
@@ -66,6 +77,10 @@ function validate(c) {
   if (String(c.operatingHours.open) >= String(c.operatingHours.close)) problems.push('operatingHours.open must be earlier than operatingHours.close');
   number('booking.pickupHoldMinutes', c.booking.pickupHoldMinutes, { min: 0, minExclusive: true, max: 240 });
   number('booking.minimumBatteryToBookPercent', c.booking.minimumBatteryToBookPercent, { min: 0, max: 100 });
+  number('parking.holdingFreeReservePercent', c.parking.holdingFreeReservePercent, { min: 0, max: 100 });
+  for (const key of ['pickupNoticePercent', 'pickupGraceMinutes', 'moveAutoSendSeconds', 'fieldMoveSeconds', 'returnLeadMinutes', 'stopCooldownMinutes']) number(`charging.${key}`, c.charging[key], { min: 0, max: 1000 });
+  number('battery.tripDropPercent', c.battery.tripDropPercent, { min: 0, max: 100 });
+  number('battery.tripDropMinutes', c.battery.tripDropMinutes, { min: 0, minExclusive: true, max: 600 });
   number('booking.maxTripHours', c.booking.maxTripHours, { min: 0, minExclusive: true, max: 72 });
   number('parking.arrivalGraceMinutes', c.parking.arrivalGraceMinutes, { min: 0, max: 240 });
   number('parking.overstayGraceMinutes', c.parking.overstayGraceMinutes, { min: 0, max: 240 });
@@ -79,7 +94,10 @@ function validate(c) {
   for (const key of ['need', 'urgency', 'waiting']) number(`charging.scheduler.weights.${key}`, s.weights[key], { min: 0, max: 1000 });
   if (!(s.weights.need + s.weights.urgency + s.weights.waiting > 0)) problems.push('charging.scheduler.weights must not all be 0');
   number('charging.scheduler.classH.batteryBelowPercent', s.classH.batteryBelowPercent, { min: 0, max: 100 });
-  number('charging.scheduler.classH.usageWithinMinutes', s.classH.usageWithinMinutes, { min: 0 });
+  number('charging.scheduler.classH.slackWithinMinutes', s.classH.slackWithinMinutes, { min: -1440, max: 1440 });
+  number('charging.scheduler.hopelessSlackMinutes', s.hopelessSlackMinutes, { min: -1440, max: 0 });
+  number('charging.scheduler.preemptMarginPoints', s.preemptMarginPoints, { min: 0, max: 100 });
+  number('charging.scheduler.preemptMaxBatteryPercent', s.preemptMaxBatteryPercent, { min: 0, max: 100 });
   number('charging.scheduler.urgencyHorizonMinutes', s.urgencyHorizonMinutes, { min: 0, minExclusive: true });
   number('charging.scheduler.waitingDivisorMinutes', s.waitingDivisorMinutes, { min: 0, minExclusive: true });
   number('charging.scheduler.estimatedSessionMinutes', s.estimatedSessionMinutes, { min: 1, max: 600 });

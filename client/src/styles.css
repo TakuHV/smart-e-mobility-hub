@@ -611,3 +611,7 @@ tr.main-account > td { background: #e3f6f1; }
 tr.main-account > td:first-child { box-shadow: inset 4px 0 0 var(--primary); }
 tr.main-account strong { color: var(--primary-strong); }
 @media (max-width: 760px) { tr.main-account { background: #e3f6f1; border-color: #b9e3da; } tr.main-account > td { background: transparent; } }
+
+/* Live battery next to a charger */
+.battery-inline { display: flex; align-items: center; gap: 8px; margin-top: 4px; }
+.battery-inline .battery-track { width: 90px; }

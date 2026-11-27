@@ -3,9 +3,9 @@
 
   "operatingHours": { "open": "05:00", "close": "23:00" },
 
-  "booking": { "pickupHoldMinutes": 15, "minimumBatteryToBookPercent": 20, "maxTripHours": 3 },
+  "booking": { "pickupHoldMinutes": 15, "minimumBatteryToBookPercent": 30, "maxTripHours": 3 },
 
-  "parking": { "arrivalGraceMinutes": 15, "overstayGraceMinutes": 15, "sharedReturnReservePercent": 10 },
+  "parking": { "arrivalGraceMinutes": 15, "overstayGraceMinutes": 15, "sharedReturnReservePercent": 10, "holdingFreeReservePercent": 40 },
 
   "thresholds": {
     "parkingWarningPercent": 80,
@@ -15,12 +15,21 @@
   },
 
   "charging": {
-    "targetBatteryPercent": 90,
+    "targetBatteryPercent": 100,
+    "pickupNoticePercent": 90,
+    "pickupGraceMinutes": 5,
+    "moveAutoSendSeconds": 15,
+    "fieldMoveSeconds": 30,
+    "returnLeadMinutes": 2,
+    "stopCooldownMinutes": 15,
     "personalRequestsPerVehiclePerDay": 2,
     "personalConnectWindowMinutes": 15,
     "scheduler": {
       "weights": { "need": 0.5, "urgency": 0.3, "waiting": 0.2 },
-      "classH": { "batteryBelowPercent": 10, "usageWithinMinutes": 60 },
+      "classH": { "batteryBelowPercent": 10, "slackWithinMinutes": 0 },
+      "hopelessSlackMinutes": -30,
+      "preemptMarginPoints": 10,
+      "preemptMaxBatteryPercent": 90,
       "urgencyHorizonMinutes": 240,
       "waitingDivisorMinutes": 3,
       "estimatedSessionMinutes": 45,

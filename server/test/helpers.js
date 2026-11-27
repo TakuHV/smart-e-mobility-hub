@@ -36,7 +36,7 @@ export const addCharger = (hubId, powerKw = 7.2, code = null) => {
 export const addVehicle = ({ kind, hubId, ownerId = null, battery = 64, connector = 'Type2', slotId = null }) => {
   const id = makeId('test-vehicle');
   db.prepare(`INSERT INTO vehicles (id,plate,vehicle_type,connector_type,kind,hub_id,owner_id,battery_level,status,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, `TEST-${id.slice(-8)}`, 'Car', connector, kind, hubId, ownerId, battery, battery < 20 ? 'Needs Charging' : 'Available', nowIso());
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, `TEST-${id.slice(-8)}`, 'Car', connector, kind, hubId, ownerId, battery, battery < 30 ? 'Needs Charging' : 'Available', nowIso());
   if (slotId) db.prepare(`UPDATE parking_slots SET status='Occupied', current_vehicle_id=? WHERE id=?`).run(id, slotId);
   return db.prepare('SELECT * FROM vehicles WHERE id=?').get(id);
 };

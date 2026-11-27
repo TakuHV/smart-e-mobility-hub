@@ -22,7 +22,7 @@ router.post('/personal', asyncRoute((req, res) => res.status(201).json({
 router.get('/bookings', asyncRoute((req, res) => res.json({ bookings: listBookings(req.user) })));
 
 router.post('/bookings', asyncRoute((req, res) => res.status(201).json({
-  booking: createBooking({ ...pick(req.body, ['vehicleId', 'destinationHubId']), user: req.user })
+  booking: createBooking({ ...pick(req.body, ['vehicleId', 'destinationHubId', 'pickupInMinutes']), user: req.user })
 })));
 
 router.post('/bookings/:bookingId/pickup', asyncRoute((req, res) => res.json({
