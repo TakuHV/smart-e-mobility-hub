@@ -10,7 +10,7 @@ The agreed MVP contains **9 core business use cases** and **4 supporting use cas
 
 | Work area | Use cases | MVP implementation boundary |
 |---|---|---|
-| Demo access | **UC-001 — Log in** | Local demo identity and role selection for the Student, Operator and Simulation Operator workflows. This is not production authentication or University SSO integration. |
+| Demo access | **UC-001 — Log in** | Local demo login by username (no password) with five fixed demo accounts and role-based menus. This is not production authentication or University SSO integration. |
 | Hub discovery | **UC-003 — Search Mobility Hub**; **UC-004 — View Hub Status** | Search and select Hubs; display available vehicle, parking-slot, charger and charging-queue information. Clearly distinguish fresh, stale and unavailable status data. |
 | Network overview | **UC-017 — Monitor Hub Network and Resource Status** | Operator dashboard summarizing Hub capacity, vehicle availability, parking occupancy, charger status, charging demand and operational warnings. |
 
@@ -49,6 +49,8 @@ The following use cases remain in the full requirements baseline but are **not p
 | UC-024 | Compare What-if Scenarios | Multi-run comparison is deferred; MVP runs and reviews an individual simulation. |
 | UC-025 | Apply Coordination Recommendations | Applying recommendations and handing them into live operational workflows is deferred; UC-023 recommendations remain proposals. |
 
+Some of these have a **supporting demo implementation** in the code (student History/cancel, Report a Problem, Profile, Admin User Accounts / Roles & Access / Configuration, and a user-redirection advisory next to vehicle redistribution). They exist to make the demo usable and are **not part of the acceptance scope**; see "Demo-only and beyond-MVP features" below.
+
 The selected MVP therefore covers **UC-001, UC-003, UC-004, UC-005, UC-006, UC-007, UC-008, UC-009, UC-017, UC-018, UC-019, UC-021 and UC-023**.
 
 The MVP uses one web client, one Express backend and one SQLite database. Seeded Hub, vehicle, slot and charger status is used as the simulated status-data source. The system reports Fresh / Stale / unavailable status rather than inventing random operational state changes. There is no real University SSO, physical IoT hardware, payment gateway, Docker, Kubernetes, microservices, Redis, message broker, WebSocket, ORM or AI/ML scheduler.
@@ -82,21 +84,50 @@ npm run build
 
 To reseed from a clean state, stop the server, delete `data/smart_e_mobility.sqlite` and its `-shm` / `-wal` companions, then run `npm run dev` again. **This deletes demo records.**
 
+## Supporting behaviour of the MVP flows
+
+- **Timers and notifications** (`server/src/services/timerService.js`, `notificationService.js`): pickup hold (15 minutes), trip time against the 3-hour limit, parking arrival/leave, charger connect window, charging progress and overstay warnings. Visible countdowns are in `client/src/components/Timers.jsx`; the bell lists notifications.
+- **Student app** (`client/src/student/`): large, simple layout with five tiles (Book a vehicle, Park my vehicle, Charge my vehicle, Report a problem, View Hubs) and a bottom bar (Home, History, Alerts, Profile). A booking stores the destination Hub; the trip screen has one "I have arrived" button, the battery is the simulated level (not typed by the student) and the return slot is chosen automatically. Students do not see Hub totals.
+- **Vehicle redistribution** (UC-018, `server/src/services/redistributionService.js`): suggestions and manual moves; tasks go Requested → In Progress → Done; the vehicle is `In Transfer` meanwhile and a destination Shared slot is kept for it.
+- **User redistribution** (`server/src/services/userRedirectService.js`, supporting; advisory only, similar to UC-020): when a Hub has no bookable vehicle or no free Shared slot, an Operator asks students to use another Open Hub. Nothing is moved and no booking is changed; students see a "Busy, please use X" notice in Book and View Hubs and receive a notification. One active redirection per Hub.
+- **Incidents** (UC-019, `server/src/services/incidentService.js`): Operators acknowledge and resolve incidents, optionally restoring the vehicle, slot or charger.
+- **Menus per role**: Student = Book / Park / Charge / Report / View Hubs. Operator = Hub Dashboard, Smart Charging, Incidents, Vehicle & User Redistribution, What-if Simulation (view). Simulation Operator = Hub Dashboard, What-if Simulation. Admin = User Accounts, Roles & Access, Configuration. Menus are enforced in the client; the API keeps its role checks per route (an Admin can technically call Operator routes).
+- An existing demo database is upgraded automatically at start (new columns/tables are added); no reseed is needed.
+
+## Demo-only and beyond-MVP features
+
+| Feature | Files | Label |
+|---|---|---|
+| Phone view (phone-sized frame) | `client/src/components/PhoneFrame.jsx` | **Demo-only** |
+| Reset demo data (also deletes non-default accounts) | `server/src/services/demoResetService.js`, `client/src/pages/Admin.jsx` | **Demo-only** |
+| Demo clock: speed x1/x10/x60/x300, pause, skip | `server/src/clock.js`, `client/src/components/DemoClockBar.jsx` | **Demo-only** |
+| Demo account (all four roles) and role switch | `server/src/services/authService.js`, `client/src/components/AppShell.jsx` | **Demo-only** |
+| "Register" line and decorative login art | `client/src/pages/Login.jsx`, `client/src/styles.css` | **Demo-only** (decoration) |
+| Admin: User Accounts, Roles & Access, Configuration (system settings, Hubs, slots, chargers, vehicles) | `client/src/pages/Users.jsx`, `Access.jsx`, `Admin.jsx`; `server/src/services/userAdminService.js`, `settingsService.js`, `adminService.js` | Beyond MVP (UC-014/015/016) |
+| Deactivated accounts cannot sign in | `server/src/middleware/requestContext.js` | Beyond MVP (UC-014) |
+| Student Report a Problem | `client/src/student/ReportFlow.jsx` | Beyond MVP (UC-013) |
+| Student History and booking cancel | `client/src/student/History.jsx` | Beyond MVP (UC-010/011) |
+| Student Profile, "Larger text" | `client/src/student/Profile.jsx` | Beyond MVP (UC-012) |
+| User redistribution advisory | `server/src/services/userRedirectService.js` | Beyond MVP (UC-020) |
+| Redistribution planned from What-if recommendations | `server/src/services/redistributionService.js` | Beyond MVP (UC-025) |
+
 ## Demo accounts
 
-The login page creates or reuses a simple local demo identity by display name and role. Suggested accounts for the selected MVP workflows:
+The login page asks for a username (no password in the demo). Five accounts exist: admin, student, operator, simulation operator and demo; usernames are not case-sensitive and an unknown username is refused. The "Register" line is decoration only. **Demo** has all four roles: type `demo` and choose "Open as", or switch later (Profile for students, the side menu for staff). Demo accounts are demo-only (see above).
 
-| Display name | Role | Use |
+| Account | Role | Use |
 |---|---|---|
-| Demo Student | Student | Hub search/status, shared-vehicle booking/pickup/return, personal parking and personal charging |
-| Demo Operator | Operator | Network monitoring, vehicle redistribution, incident handling and Smart Charging Scheduler |
-| Demo Simulation Operator | Simulation Operator | Run and review an individual What-if Simulation (UC-023) |
+| Student | Student | Book a vehicle, park, charge, report a problem, view Hubs |
+| Operator | Operator | Hub dashboard, Smart Charging, incidents, vehicle redistribution, view What-if Simulation |
+| Simulation Operator | Simulation Operator | Hub dashboard, run and review What-if Simulation (UC-023) |
+| Admin | Admin | User accounts, roles and access, configuration |
+| Demo | all four | Open any of the four experiences |
 
 The demo role selector is not secure production authentication. It does not call the university identity provider. Full Admin account/role management is outside the selected MVP. Do not expose this MVP to the public internet without replacing the demo identity mechanism and adding production security controls.
 
 ## Seed data
 
-The seed creates three example Hubs, Shared and Personal parking slots, Holding slots, chargers, a small shared fleet, two personal vehicles for `Demo Student`, and one shared low-battery charging request. Seed data should also include enough resource and incident conditions to demonstrate the UC-017 monitoring and selected UC-019 incident-handling flows.
+The seed creates three example Hubs, Shared and Personal parking slots, Holding slots, chargers, a small shared fleet, two personal vehicles for the `Student` account, and one shared low-battery charging request. Seed data should also include enough resource and incident conditions to demonstrate the UC-017 monitoring and selected UC-019 incident-handling flows.
 
 Seeded Hub Power Limits and charger power values are example demonstration data. They are not a group-approved operating configuration. Edit `data/configuration.json` and the Hub seed values if the team approves different values.
 
@@ -116,17 +147,17 @@ Seeded Hub Power Limits and charger power values are example demonstration data.
 
 ## Explicit demo assumptions — not approved requirements
 
-Submission #1 v7 specifies that the Charging Scheduler uses Battery Level, Next Required Usage Time, Waiting Duration and Hub Power Limit (BR-20 / BR-21), and that the weights are configurable. The actual weights and scheduling interval are still to be defined by the group. To make the MVP demonstrable, `configuration.json` contains **equal illustrative weights** and the service uses clearly named normalization horizons. It also uses a **45-minute illustrative charging-session estimate** to show approximate queue times. These are implementation placeholders, not approved business rules, and must be confirmed or replaced before final acceptance. The estimate is not a guarantee (BR-43).
+Submission #1 v7 specifies that the Charging Scheduler uses Battery Level, Next Required Usage Time, Waiting Duration and Hub Power Limit (BR-20 / BR-21), and that the weights are configurable. The actual weights and scheduling interval are still to be defined by the group. To make the MVP demonstrable, `data/configuration.json` contains **illustrative weights** (0.5 / 0.3 / 0.2) and the service uses clearly named normalization horizons. It also uses a **45-minute illustrative charging-session estimate** to show approximate queue times. These are implementation placeholders, not approved business rules, and must be confirmed or replaced before final acceptance. The estimate is not a guarantee (BR-43).
 
 The replacement threshold in BR-22 and the maximum charging-session duration in BR-23 are not defined, so automatic charging-session replacement and maximum-session expiry are not implemented. Charging sessions can be completed manually in the demo.
 
 The MVP's UC-023 implementation ends with stored simulation results and proposed recommendations. Multi-run comparison (UC-024), recommendation application and operational workflow hand-off (UC-025), redirect advisories (UC-020) and advanced charging schedule adjustment (UC-022) are not included in the agreed MVP, even if experimental code or routes for a later iteration are present in the repository.
 
-The MVP does not implement every timing reminder, 3-hour overdue-trip escalation, parking overstay-to-Holding workflow, all incident categories, violation appeal/restriction lifecycle, student problem-reporting workflow, or complete UC-016 configuration editor. UC-019 is limited to the selected core incident-handling path; these advanced supporting flows remain outside the MVP.
+Timing reminders, the 3-hour overdue-trip warning, parking/charging overstay flags, student problem reporting and an Admin configuration editor exist as supporting demo behaviour, but they are not acceptance criteria. The parking overstay-to-Holding workflow, all incident categories and the violation appeal/restriction lifecycle are not implemented. UC-019 is limited to the selected core incident-handling path.
 
 ## Tests and verification
 
-Run the backend workflow tests from the project root:
+Run the backend workflow tests from the project root (`node --test server/test/*.test.js`, 26 tests, each run uses an in-memory database from `server/testSetup.js`, so the demo data is untouched):
 
 ```bash
 npm test
@@ -134,13 +165,13 @@ npm test
 
 The MVP acceptance tests should cover: (1) UC-005 / UC-006 / UC-007 booking, pickup, low-battery return and automatic queueing; (2) UC-008 parking reservation, arrival/departure and conflict validation; (3) UC-009 / UC-021 personal charging, scheduler allocation, connector/Hub Power Limit validation and charger release only after Move Vehicle Request `Done`; (4) UC-017 / UC-018 network monitoring and the basic redistribution plan/dispatch/arrival workflow; (5) UC-019 incident status and resource-state updates; and (6) UC-023 simulation isolation, stored results and proposed recommendations.
 
-The existing test suite may retain regression tests for later or experimental features such as UC-024 comparison and UC-025 recommendation hand-off. Those tests do not expand the agreed MVP scope or acceptance criteria.
+The test suite also covers supporting features (timers, Admin configuration, user accounts, reset, user redistribution) and may retain regression tests for later features such as UC-024 comparison and UC-025 recommendation hand-off. Those tests do not expand the agreed MVP scope or acceptance criteria.
 
 The JSX source was syntax-parsed and the backend JavaScript / JSON files were checked. The frontend production bundle and live Express HTTP server were not built or smoke-tested in the preparation environment because npm dependency installation could not complete there; run `npm install` followed by `npm run dev` on a machine with npm registry access.
 
 ## API overview
 
-The following are the currently documented main endpoints associated with MVP workflows. Monitoring, redistribution and incident routes should be kept consistent with the actual route definitions in `server/src/routes`; their exact paths are not guessed here.
+Main endpoints (route definitions are in `server/src/routes`). Rows marked *support* are demo or beyond-MVP.
 
 | Method | Endpoint | Purpose |
 |---|---|---|
@@ -160,6 +191,17 @@ The following are the currently documented main endpoints associated with MVP wo
 | POST | `/api/charging/move-requests/:id/start` | Start a recorded vehicle movement |
 | POST | `/api/charging/move-requests/:id/done` | Confirm movement and release charger when applicable |
 | POST | `/api/simulation/runs` | Run a What-if Simulation (UC-023) |
+| GET | `/api/redistribution/overview` | Hub balance, suggestions and tasks (UC-018) |
+| POST | `/api/redistribution/tasks` | Create a vehicle move task (UC-018) |
+| POST | `/api/redistribution/tasks/:id/start` · `/done` · `/cancel` | Task lifecycle (UC-018) |
+| GET / POST | `/api/incidents` | List / report incidents (UC-019) |
+| GET / POST | `/api/redistribution/user-redirects` | *support* Redirection suggestions and active list / ask students to use another Hub |
+| POST | `/api/redistribution/user-redirects/:id/end` | *support* End a redirection |
+| GET | `/api/hubs/redirects` | *support* Notices shown to students |
+| GET / POST | `/api/clock` | *support (demo-only)* Demo clock |
+| GET / POST | `/api/notifications` | *support* Notifications |
+| GET / POST | `/api/admin/users` · `/api/admin/access` · `/api/admin/settings` | *support* Accounts, access overview, configuration |
+| POST | `/api/admin/reset-demo` | *support (demo-only)* Reset data, body `{"confirm":"RESET"}` |
 
 The `/api/simulation/compare` and `/api/simulation/recommendations/:id/apply` endpoints are not part of the agreed MVP acceptance scope because UC-024 and UC-025 are deferred.
 
@@ -171,21 +213,29 @@ smart-e-mobility-hub/
 │   ├── index.html
 │   ├── package.json
 │   └── src/
-│       ├── pages/                 # Login, Dashboard, Vehicles, Parking, Charging, Simulation
-│       ├── components/            # App shell, status badges, stat cards, feedback
-│       ├── api.js
-│       ├── App.jsx
-│       ├── main.jsx
+│       ├── pages/                 # Login, HubDashboard, Charging, Incidents, Dispatch (vehicle & user redistribution),
+│       │                          # Simulation, Users, Access, Admin
+│       ├── student/               # Student app: StudentApp, Home, BookFlow, ParkFlow, ChargeFlow, ReportFlow,
+│       │                          # Hubs, History, Notifications, Profile, ui.jsx, student.css
+│       ├── components/            # AppShell, PhoneFrame (demo), DemoClockBar (demo), NotificationBell, Timers,
+│       │                          # StatusBadge, StatCard, SectionHeader, RefreshButton, Feedback
+│       ├── api.js  clock.js  hooks.js  userOrder.js
+│       ├── App.jsx  main.jsx
 │       └── styles.css
 ├── server/
 │   ├── package.json
+│   ├── testSetup.js               # in-memory database for tests
 │   ├── src/
-│   │   ├── routes/
-│   │   ├── services/
+│   │   ├── routes/                # auth, hubs, vehicles, parking, charging, simulation, redistribution, incidents,
+│   │   │                          # clock, notifications, admin
+│   │   ├── services/              # vehicle, parking, charging, hub, simulation, redistribution, userRedirect,
+│   │   │                          # incident, timer, notification, settings, admin, userAdmin, auth, demoReset, ...
 │   │   ├── middleware/
-│   │   ├── database/              # SQLite schema, connection and seed
+│   │   ├── database/              # schema.sql, db.js (connection and migrations), seed.js
+│   │   ├── clock.js               # demo clock
+│   │   ├── config.js              # configuration loader
 │   │   └── app.js
-│   └── test/
+│   └── test/                      # features.test.js, mvp.test.js, helpers.js
 ├── data/
 │   └── configuration.json
 ├── docs/

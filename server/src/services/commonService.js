@@ -1,5 +1,6 @@
 import { db, makeId, nowIso } from '../database/db.js';
 
+import { now as clockNow } from '../clock.js';
 export class HttpError extends Error {
   constructor(status, message, details = undefined) {
     super(message);
@@ -15,7 +16,7 @@ export function requireValue(condition, status, message) {
 export function addViolation(userId, points, reason, sourceType, sourceId) {
   if (!userId || points <= 0) return;
   const recordedAt = nowIso();
-  const expiresAt = new Date(Date.now() + 14 * 24 * 60 * 60 * 1000).toISOString();
+  const expiresAt = new Date(clockNow() + 14 * 24 * 60 * 60 * 1000).toISOString();
   db.prepare(`INSERT INTO violations
     (id, user_id, points, reason, source_type, source_id, recorded_at, expires_at, status)
     VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'Recorded')`)

@@ -5,6 +5,8 @@ import StatusBadge from '../components/StatusBadge';
 import { EmptyState, Feedback } from '../components/Feedback';
 import RefreshButton from '../components/RefreshButton';
 import { scrollTopOnPhone } from '../hooks';
+import { virtualNow, useClockState, useAutoRefresh } from '../clock';
+import { Countdown, ElapsedBar } from '../components/Timers';
 
 const fmtTime = value => (value ? new Date(value).toLocaleTimeString() : '—');
 const fmtDateTime = value => (value ? new Date(value).toLocaleString() : 'Not set');
@@ -15,7 +17,7 @@ export default function Charging({ user }) {
   const [hubId, setHubId] = useState('');
   const [vehicleId, setVehicleId] = useState('');
   const [battery, setBattery] = useState(35);
-  const [nextUse, setNextUse] = useState(isoToLocalInput(new Date(Date.now() + 90 * 60000)));
+  const [nextUse, setNextUse] = useState(isoToLocalInput(new Date(virtualNow() + 90 * 60000)));
   const [data, setData] = useState({ requests: [], chargers: [], moveRequests: [] });
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
@@ -24,16 +26,18 @@ export default function Charging({ user }) {
   // The owner of a personal vehicle moves it themselves, so they may start and confirm its Move Vehicle Requests.
   const myVehicleIds = new Set(isStudent ? vehicles.map(v => v.id) : []);
 
-  async function load() {
-    setError('');
+  const { limits } = useClockState();
+  async function load(silent) {
+    if (silent !== true) setError('');
     try {
       const [h, v, q] = await Promise.all([api('/hubs'), api('/vehicles?kind=personal'), api('/charging/queue')]);
       setHubs(h.hubs); setVehicles(v.vehicles); setData(q);
       setVehicleId(prev => prev || v.vehicles[0]?.id || '');
       setHubId(prev => prev || v.vehicles[0]?.hub_id || h.hubs[0]?.id || '');
-    } catch (err) { setError(err.message); }
+    } catch (err) { if (silent !== true) setError(err.message); }
   }
   useEffect(() => { load(); }, []);
+  useAutoRefresh(load, 15);
 
   async function register(event) {
     event.preventDefault(); setError(''); setSuccess('');
@@ -52,7 +56,7 @@ export default function Charging({ user }) {
   }
   const runScheduler = () => action('/charging/run-scheduler', 'Scheduler cycle completed. Power limit and connector compatibility were checked.');
   async function updateUsage(req) {
-    const suggestion = req.next_required_usage_at ? isoToLocalInput(req.next_required_usage_at) : isoToLocalInput(new Date(Date.now() + 60 * 60000));
+    const suggestion = req.next_required_usage_at ? isoToLocalInput(req.next_required_usage_at) : isoToLocalInput(new Date(virtualNow() + 60 * 60000));
     const value = prompt('Enter the new Next Required Usage Time (local format YYYY-MM-DDTHH:mm)', suggestion);
     if (!value) return;
     const iso = localInputToIso(value);
@@ -91,7 +95,11 @@ export default function Charging({ user }) {
           <tbody>{data.requests.map(r => <tr key={r.id}>
             <td className="primary"><strong>{r.plate}</strong><small>{r.request_type === 'shared_automatic' ? 'Shared · automatic' : 'Personal'}{r.priority_class ? ` · class ${r.priority_class}` : ''} · score {Number(r.priority_score || 0).toFixed(1)}</small></td>
             <td data-label="Hub">{r.hub_name}</td><td className="num" data-label="Battery">{r.battery_level}%</td><td data-label="Next use">{fmtDateTime(r.next_required_usage_at)}</td>
-            <td data-label="Status"><StatusBadge value={r.status}/><small>{r.charger_code || (r.estimated_start_at ? `Est. start ${fmtTime(r.estimated_start_at)}` : 'Estimate pending')}</small></td>
+            <td data-label="Status"><StatusBadge value={r.status}/><small>{r.charger_code || (r.estimated_start_at ? `Est. start ${fmtTime(r.estimated_start_at)}` : 'Estimate pending')}</small>
+              {r.status === 'Assigned' && r.connect_deadline && r.request_type === 'personal' && <small><Countdown until={r.connect_deadline} label="Connect within" overLabel="expired"/></small>}
+              {r.status === 'Queued' && r.estimated_start_at && <small><Countdown until={r.estimated_start_at} label="Est. start in" overLabel="due" warnSeconds={0}/></small>}
+              {r.status === 'Charging' && r.charging_started_at && <ElapsedBar since={r.charging_started_at} limitMinutes={limits?.maxSessionMinutes || undefined} label={`Charging ${r.battery_level}% → ${limits?.targetBatteryPercent ?? 90}%`}/>}
+              {r.overstay_flagged_at && <small className="countdown is-over">Still at charger — move it away</small>}</td>
             <td className="actions"><div className="button-row">
               {r.status === 'Assigned' && r.request_type === 'personal' && r.user_id === user.id && <button className="button small primary" onClick={() => action(`/charging/requests/${r.id}/connect`, 'Vehicle connected. Charging session started.')}>Connect vehicle</button>}
               {r.status === 'Charging' && (isOperator || r.user_id === user.id) && <button className="button small secondary" onClick={() => action(`/charging/requests/${r.id}/complete`, 'Charging completed. A Move Vehicle Request was created; the charger stays occupied until the removal is Done.')}>Complete</button>}

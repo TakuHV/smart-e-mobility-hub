@@ -1,3 +1,4 @@
+import '../testSetup.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { db, makeId, nowIso } from '../src/database/db.js';
@@ -65,9 +66,11 @@ test('UC-008: personal parking reservation occupies and releases a Personal slot
 test('UC-009/021 and BR-46: personal charging, removal request and charger release only after Done', () => {
   const student=addUser('Student');
   const operator=addUser('Operator');
+  // The test must not depend on the time of day: the Hub is open all day and the next use is soon.
+  db.prepare("UPDATE hubs SET open_time='00:00', close_time='23:59' WHERE id='hub-engineering'").run();
   const vehicle=addVehicle({kind:'personal',hubId:'hub-engineering',ownerId:student.id,battery:32});
   const request=createPersonalChargingRequest({user:student,vehicleId:vehicle.id,hubId:'hub-engineering',batteryLevel:32,
-    nextRequiredUsageAt:new Date(Date.now()+4*3600000).toISOString()});
+    nextRequiredUsageAt:new Date(Date.now()+20*60000).toISOString()});
   assert.ok(['Assigned','Queued'].includes(request.status));
   if(request.status==='Queued') runScheduler('hub-engineering');
   const assigned=db.prepare('SELECT * FROM charging_requests WHERE id=?').get(request.id);
@@ -90,7 +93,7 @@ test('UC-023/024/025: simulation snapshots stay separate from live data and reco
   assert.equal(run1.label,'Simulated');
   assert.equal(run1.recommendations[0].status,'Proposed');
   const comparison=compareSimulationRuns({user:simulationOperator,runIds:[run1.id,run2.id]});
-  assert.equal(comparison.length,2);
+  assert.equal(comparison.runs.length,2);
   const after=db.prepare("SELECT id,status,battery_level FROM vehicles WHERE hub_id='hub-central' ORDER BY id").all();
   assert.deepEqual(after,before,'Simulation must not mutate live vehicle state.');
   const sent=applyRecommendation({user:simulationOperator,recommendationId:run1.recommendations[0].id});

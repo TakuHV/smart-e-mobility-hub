@@ -3,6 +3,7 @@ import { readFileSync, mkdirSync } from 'node:fs';
 import { randomUUID } from 'node:crypto';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { nowIso as clockNowIso } from '../clock.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 export const projectRoot = resolve(here, '../../..');
@@ -26,6 +27,34 @@ try {
 } catch (error) {
   throw new Error(`Could not apply schema.sql (${error.message}). If the schema changed, delete ${databasePath} and its -wal/-shm files to reseed the demo data.`, { cause: error });
 }
+
+// A database file created by an earlier version keeps its old tables, so columns added later are added here (CREATE TABLE IF NOT EXISTS does not).
+function addColumnIfMissing(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all().map(row => row.name);
+  if (!columns.includes(column)) db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+}
+for (const [column, definition] of [
+  ['category', "TEXT NOT NULL DEFAULT 'Vehicle fault'"],
+  ['severity', "TEXT NOT NULL DEFAULT 'Medium'"],
+  ['source', "TEXT NOT NULL DEFAULT 'operator'"],
+  ['charger_id', 'TEXT REFERENCES chargers(id)'],
+  ['slot_id', 'TEXT REFERENCES parking_slots(id)'],
+  ['reported_by', 'TEXT'],
+  ['assigned_to', 'TEXT'],
+  ['resolution_note', 'TEXT'],
+  ['updated_at', 'TEXT'],
+  ['resolved_at', 'TEXT']
+]) addColumnIfMissing('incidents', column, definition);
+// Columns the timers added to tables that an earlier demo database already has.
+for (const [table, column, definition] of [
+  ['users', 'status', "TEXT NOT NULL DEFAULT 'Active'"],
+  ['bookings', 'start_battery', 'INTEGER'],
+  ['bookings', 'overdue_at', 'TEXT'],
+  ['bookings', 'destination_hub_id', 'TEXT REFERENCES hubs(id)'],
+  ['parking_reservations', 'overstay_flagged_at', 'TEXT'],
+  ['charging_requests', 'start_battery', 'INTEGER'],
+  ['charging_requests', 'overstay_flagged_at', 'TEXT']
+]) addColumnIfMissing(table, column, definition);
 
 /*
  * All-or-nothing unit of work (BR-36). The callback must be synchronous: a transaction cannot wait for a promise.
@@ -64,8 +93,9 @@ export function closeDatabase() {
   db.close();
 }
 
+// The demo clock (server/src/clock.js): equal to the real time at speed x1.
 export function nowIso() {
-  return new Date().toISOString();
+  return clockNowIso();
 }
 
 export function makeId(prefix = 'id') {

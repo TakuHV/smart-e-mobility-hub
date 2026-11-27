@@ -2,6 +2,7 @@ import { Router } from 'express';
 import { asyncRoute, requireLogin, requireRoles } from '../middleware/requestContext.js';
 import { listHubs, getHubStatus } from '../services/hubService.js';
 import { setSimulatedSensorFeed } from '../services/chargingService.js';
+import { activeRedirects } from '../services/userRedirectService.js';
 import { HttpError } from '../services/commonService.js';
 
 const RESOURCE_TYPES = ['', 'shared', 'parking', 'return', 'charger'];
@@ -14,6 +15,9 @@ router.get('/', asyncRoute((req, res) => {
   if (!RESOURCE_TYPES.includes(resourceType)) throw new HttpError(400, `resourceType must be one of: ${RESOURCE_TYPES.filter(Boolean).join(', ')}.`);
   res.json({ hubs: listHubs({ q: String(req.query.q || ''), resourceType }) });
 }));
+
+// Notices for students: Hubs that currently ask users to go to another Hub.
+router.get('/redirects', asyncRoute((_req, res) => res.json({ redirects: activeRedirects() })));
 
 router.get('/:hubId/status', asyncRoute((req, res) => {
   // The user is passed on so that a Student does not see other students' personal vehicles (BR-07).

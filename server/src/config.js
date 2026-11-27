@@ -21,6 +21,7 @@ const defaults = {
     targetBatteryPercent: 90,
     personalRequestsPerVehiclePerDay: 2,
     personalConnectWindowMinutes: 15,
+    maxSessionMinutes: null,
     scheduler: {
       weights: { need: 0.5, urgency: 0.3, waiting: 0.2 },
       classH: { batteryBelowPercent: 10, usageWithinMinutes: 60 },
@@ -30,6 +31,13 @@ const defaults = {
     }
   },
   status: { staleAfterMinutes: 2, refreshIntervalSeconds: 60 },
+  reminders: { tripReminderMinutes: 150, parkingReminderBeforeEndMinutes: 10, lowBatteryWarningPercent: 15 },
+  battery: {
+    capacityKwhByVehicleType: { Motorcycle: 3.5, Car: 24 },
+    defaultCapacityKwh: 10,
+    tripConsumptionKwByVehicleType: { Motorcycle: 1.2, Car: 6 },
+    defaultTripConsumptionKw: 3
+  },
   demoData: {
     seedHubPowerLimitsKw: { 'hub-central': 7.2, 'hub-engineering': 14.4, 'hub-library': 14.4 },
     seedChargerPowerKw: 7.2
@@ -75,11 +83,37 @@ function validate(c) {
   number('charging.scheduler.urgencyHorizonMinutes', s.urgencyHorizonMinutes, { min: 0, minExclusive: true });
   number('charging.scheduler.waitingDivisorMinutes', s.waitingDivisorMinutes, { min: 0, minExclusive: true });
   number('charging.scheduler.estimatedSessionMinutes', s.estimatedSessionMinutes, { min: 1, max: 600 });
+  number('reminders.tripReminderMinutes', c.reminders.tripReminderMinutes, { min: 0, minExclusive: true });
+  if (c.reminders.tripReminderMinutes >= c.booking.maxTripHours * 60) problems.push('reminders.tripReminderMinutes must be shorter than booking.maxTripHours');
+  number('reminders.parkingReminderBeforeEndMinutes', c.reminders.parkingReminderBeforeEndMinutes, { min: 0, max: 240 });
+  number('reminders.lowBatteryWarningPercent', c.reminders.lowBatteryWarningPercent, { min: 0, max: 100 });
+  number('battery.defaultCapacityKwh', c.battery.defaultCapacityKwh, { min: 0, minExclusive: true });
+  number('battery.defaultTripConsumptionKw', c.battery.defaultTripConsumptionKw, { min: 0, minExclusive: true });
+  for (const [type, kwh] of Object.entries(c.battery.capacityKwhByVehicleType)) number(`battery.capacityKwhByVehicleType.${type}`, kwh, { min: 0, minExclusive: true });
+  for (const [type, kw] of Object.entries(c.battery.tripConsumptionKwByVehicleType)) number(`battery.tripConsumptionKwByVehicleType.${type}`, kw, { min: 0, minExclusive: true });
+  if (c.charging.maxSessionMinutes !== null) number('charging.maxSessionMinutes', c.charging.maxSessionMinutes, { min: 1, max: 1440 });
   number('status.staleAfterMinutes', c.status.staleAfterMinutes, { min: 0, minExclusive: true });
   number('status.refreshIntervalSeconds', c.status.refreshIntervalSeconds, { min: 1 });
   number('demoData.seedChargerPowerKw', c.demoData.seedChargerPowerKw, { min: 0, minExclusive: true });
   for (const [hub, kw] of Object.entries(c.demoData.seedHubPowerLimitsKw)) number(`demoData.seedHubPowerLimitsKw.${hub}`, kw, { min: 0, minExclusive: true });
   return problems;
+}
+
+const clone = value => JSON.parse(JSON.stringify(value));
+
+// Copies `source` into `target` in place, so every module that kept a reference such as config.charging.scheduler sees the new values.
+function assignDeep(target, source) {
+  for (const [key, value] of Object.entries(source)) {
+    if (isPlainObject(value) && isPlainObject(target[key])) assignDeep(target[key], value);
+    else target[key] = value;
+  }
+}
+
+export class ConfigError extends Error {
+  constructor(problems) {
+    super(`Invalid settings: ${problems.join('; ')}`);
+    this.problems = problems;
+  }
 }
 
 function load() {
@@ -95,3 +129,42 @@ function load() {
 }
 
 export const config = load();
+
+// The values as read from the file, before any change made in the Admin area (used by "reset to defaults").
+const baseConfig = clone(config);
+
+// Sections the Admin area may change while the server runs. demoData and the file's note fields stay read-only.
+export const EDITABLE_SECTIONS = ['booking', 'parking', 'thresholds', 'charging', 'reminders', 'status', 'battery'];
+
+/*
+ * Applies a partial change (same shape as configuration.json) to the running configuration. The whole result is validated
+ * first; if anything is invalid nothing changes. Returns the new configuration.
+ */
+export function updateConfig(patch) {
+  if (!isPlainObject(patch)) throw new ConfigError(['the change must be an object']);
+  const unknown = Object.keys(patch).filter(key => !EDITABLE_SECTIONS.includes(key));
+  if (unknown.length) throw new ConfigError([`these sections cannot be changed here: ${unknown.join(', ')}`]);
+  const next = merge(clone(config), patch);
+  const problems = validate(next);
+  if (problems.length) throw new ConfigError(problems);
+  assignDeep(config, next);
+  return config;
+}
+
+// Removes keys from `target` that `source` does not have (for example a vehicle type added in the Admin area).
+function prune(target, source) {
+  for (const key of Object.keys(target)) {
+    if (!(key in source)) delete target[key];
+    else if (isPlainObject(target[key]) && isPlainObject(source[key])) prune(target[key], source[key]);
+  }
+}
+
+export function resetConfig() {
+  const base = clone(baseConfig);
+  assignDeep(config, base);
+  prune(config, base);
+  return config;
+}
+
+export const editableConfig = () => Object.fromEntries(EDITABLE_SECTIONS.map(key => [key, clone(config[key])]));
+export const fileConfig = () => Object.fromEntries(EDITABLE_SECTIONS.map(key => [key, clone(baseConfig[key])]));

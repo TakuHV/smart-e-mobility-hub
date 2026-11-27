@@ -4,17 +4,28 @@ import { db, databasePath, closeDatabase } from './database/db.js';
 import { seedDatabase } from './database/seed.js';
 import { attachUser } from './middleware/requestContext.js';
 import { HttpError } from './services/commonService.js';
-import { runMaintenance } from './services/chargingService.js';
+import { runCycle } from './services/timerService.js';
+import { clockStatus } from './clock.js';
+import { config } from './config.js';
 import authRoutes from './routes/authRoutes.js';
 import hubRoutes from './routes/hubRoutes.js';
 import vehicleRoutes from './routes/vehicleRoutes.js';
 import parkingRoutes from './routes/parkingRoutes.js';
 import chargingRoutes from './routes/chargingRoutes.js';
 import simulationRoutes from './routes/simulationRoutes.js';
+import clockRoutes from './routes/clockRoutes.js';
+import notificationRoutes from './routes/notificationRoutes.js';
+import adminRoutes from './routes/adminRoutes.js';
+import redistributionRoutes from './routes/redistributionRoutes.js';
+import incidentRoutes from './routes/incidentRoutes.js';
+import { loadSavedSettings } from './services/settingsService.js';
+import { ensureDemoAccounts } from './services/authService.js';
 
 const isTest = process.env.NODE_ENV === 'test';
 
 seedDatabase();
+ensureDemoAccounts(); // Admin, Student, Operator, Simulation Operator and Demo (all four roles)
+loadSavedSettings(); // changes made in the Admin area, applied on top of configuration.json
 
 const app = express();
 app.disable('x-powered-by');
@@ -38,6 +49,11 @@ app.use('/api/vehicles', vehicleRoutes);
 app.use('/api/parking', parkingRoutes);
 app.use('/api/charging', chargingRoutes);
 app.use('/api/simulation', simulationRoutes);
+app.use('/api/clock', clockRoutes);
+app.use('/api/notifications', notificationRoutes);
+app.use('/api/admin', adminRoutes);
+app.use('/api/redistribution', redistributionRoutes);
+app.use('/api/incidents', incidentRoutes);
 
 app.use((req, res) => res.status(404).json({ error: `Route not found: ${req.method} ${req.path}` }));
 
@@ -60,19 +76,26 @@ app.use((error, _req, res, _next) => {
   res.status(500).json({ error: 'Unexpected server error. Existing data was not reported as successfully changed.' });
 });
 
-// NI-01 / NI-02 / NI-04: one periodic cycle. runMaintenance() expires holds, refreshes the simulated status feed
-// and runs the Charging Scheduler, so it is the only call needed here.
-function runCycle() {
-  try { runMaintenance(); }
-  catch (error) { console.error('Background maintenance failed:', error); }
+// NI-01 / NI-02 / NI-04 / NI-09 / NI-11: one periodic cycle (timers, expiry of holds, status refresh, Charging Scheduler).
+// It runs every status.refreshIntervalSeconds of DEMO time. At a faster demo clock the real wait is shorter, never below a quarter second.
+function runDue() {
+  try { runCycle(); }
+  catch (error) { console.error('Background cycle failed:', error); }
 }
 
 let maintenanceTimer;
 let server;
 if (!isTest) {
-  const intervalMs = Math.max(1000, Number(process.env.MAINTENANCE_INTERVAL_MS) || 60_000);
-  runCycle();
-  maintenanceTimer = setInterval(runCycle, intervalMs);
+  const TICK_MS = 250;
+  let lastRunReal = 0;
+  runDue();
+  lastRunReal = Date.now();
+  maintenanceTimer = setInterval(() => {
+    const { speed, paused } = clockStatus();
+    if (paused) return;
+    const dueMs = Math.max(TICK_MS, (config.status.refreshIntervalSeconds * 1000) / speed);
+    if (Date.now() - lastRunReal >= dueMs) { lastRunReal = Date.now(); runDue(); }
+  }, TICK_MS);
   maintenanceTimer.unref?.();
 
   const port = Number(process.env.PORT || 4000);

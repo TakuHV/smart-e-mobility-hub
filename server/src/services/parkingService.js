@@ -1,9 +1,9 @@
 import { db, transaction, makeId, nowIso } from '../database/db.js';
 import { HttpError, requireValue, getViolationSummary, inHubOperatingHours, auditChange, addViolation, parseJson } from './commonService.js';
 
-const ARRIVAL_GRACE_MINUTES = 15;   // BR-12
-const OVERSTAY_GRACE_MINUTES = 15;  // BR-48
 
+import { now as clockNow } from '../clock.js';
+import { config } from '../config.js';
 function parsePeriod(startAt, endAt) {
   requireValue(startAt && endAt, 400, 'Choose a valid parking start and end time.');
   const start = new Date(startAt);
@@ -59,12 +59,12 @@ export function createReservation({ user, vehicleId, hubId, slotId, startAt, end
   requireValue(!restriction.suspended, 403,
     `Your account is suspended from creating new reservations until ${restriction.suspendedUntil} (BR-59).`);
   const { start, end } = parsePeriod(startAt, endAt);
-  requireValue(start.getTime() > Date.now() - 60_000, 400, 'The parking start time must be in the future.');
+  requireValue(start.getTime() > clockNow() - 60_000, 400, 'The parking start time must be in the future.');
   const startIso = start.toISOString();
   const endIso = end.toISOString();
   const reservationId = makeId('parking');
-  const expiresAt = new Date(start.getTime() + ARRIVAL_GRACE_MINUTES * 60 * 1000).toISOString();
-  const mustLeaveBy = new Date(end.getTime() + OVERSTAY_GRACE_MINUTES * 60 * 1000).toISOString();
+  const expiresAt = new Date(start.getTime() + config.parking.arrivalGraceMinutes * 60 * 1000).toISOString();
+  const mustLeaveBy = new Date(end.getTime() + config.parking.overstayGraceMinutes * 60 * 1000).toISOString();
 
   transaction(() => {
     const now = nowIso();
@@ -127,13 +127,13 @@ export function arriveReservation({ user, reservationId }) {
     const now = nowIso();
     const reservation = loadReservationForActor(user, reservationId, 'Only the reservation owner can check in.');
     requireValue(reservation.status === 'Confirmed', 409, 'Only a Confirmed parking reservation can be checked in.');
-    requireValue(Date.now() >= Date.parse(reservation.start_at), 409, 'The reservation start time has not arrived yet.');
+    requireValue(clockNow() >= Date.parse(reservation.start_at), 409, 'The reservation start time has not arrived yet.');
 
-    if (Date.now() > Date.parse(reservation.expires_at)) {
+    if (clockNow() > Date.parse(reservation.expires_at)) {
       // BR-12 / UC-008: not used in time -> Expired, the spot is released, 1 point (BR-52).
       db.prepare(`UPDATE parking_reservations SET status='Expired' WHERE id=? AND status='Confirmed'`).run(reservationId);
       db.prepare(`UPDATE parking_slots SET status='Available', updated_at=? WHERE id=? AND status='Reserved'`).run(now, reservation.slot_id);
-      addViolation(reservation.user_id, 1, 'Personal parking reservation was not used within the 15-minute arrival grace period.',
+      addViolation(reservation.user_id, 1, `Personal parking reservation was not used within the ${config.parking.arrivalGraceMinutes}-minute arrival grace period.`,
         'parking', reservationId);
       auditChange('ParkingReservation', reservationId, 'PARKING_RESERVATION_EXPIRED', { detectedAt: 'arrival' }, 'system');
       graceElapsed = true;
@@ -148,7 +148,7 @@ export function arriveReservation({ user, reservationId }) {
     auditChange('ParkingReservation', reservationId, 'PERSONAL_VEHICLE_ARRIVED', {}, user.id);
   });
   requireValue(!graceElapsed, 409,
-    'The 15-minute arrival grace period has elapsed. The reservation is now Expired, the spot is released and one violation point was recorded (BR-12, BR-52).');
+    `The ${config.parking.arrivalGraceMinutes}-minute arrival grace period has elapsed. The reservation is now Expired, the spot is released and one violation point was recorded (BR-12, BR-52).`);
   return db.prepare('SELECT * FROM parking_reservations WHERE id=?').get(reservationId);
 }
 
@@ -158,14 +158,14 @@ export function completeReservation({ user, reservationId }) {
     const now = nowIso();
     const reservation = loadReservationForActor(user, reservationId, 'Only the reservation owner can complete this reservation.');
     requireValue(reservation.status === 'In Progress', 409, 'Only an active parking reservation can be completed.');
-    lateMinutes = Math.max(0, (Date.now() - Date.parse(reservation.end_at)) / 60000);
+    lateMinutes = Math.max(0, (clockNow() - Date.parse(reservation.end_at)) / 60000);
     db.prepare(`UPDATE parking_reservations SET status='Completed', completed_at=? WHERE id=?`).run(now, reservationId);
     db.prepare(`UPDATE parking_slots SET status='Available', current_vehicle_id=NULL, updated_at=? WHERE id=?`).run(now, reservation.slot_id);
     // Do not overwrite a status set meanwhile by another workflow (for example charging).
     db.prepare(`UPDATE vehicles SET status='Available', hub_id=?, updated_at=? WHERE id=? AND status='Parked'`)
       .run(reservation.hub_id, now, reservation.vehicle_id);
     // BR-48 / BR-52: staying more than 15 minutes after the end is an overstay (1 point).
-    if (lateMinutes > OVERSTAY_GRACE_MINUTES) {
+    if (lateMinutes > config.parking.overstayGraceMinutes) {
       addViolation(reservation.user_id, 1, 'Personal vehicle overstayed a parking reservation.', 'parking', reservationId);
     }
     auditChange('ParkingReservation', reservationId, 'PARKING_RESERVATION_COMPLETED', { lateMinutes: Number(lateMinutes.toFixed(1)) }, user.id);
@@ -182,7 +182,7 @@ export function cancelReservation({ user, reservationId }) {
     const now = nowIso();
     const reservation = loadReservationForActor(user, reservationId, 'Only the reservation owner can cancel this reservation.');
     requireValue(reservation.status === 'Confirmed', 409, 'Only a reservation that has not started can be cancelled.');
-    requireValue(Date.now() < Date.parse(reservation.start_at), 409,
+    requireValue(clockNow() < Date.parse(reservation.start_at), 409,
       'The parking period has already started, so the reservation can no longer be cancelled (BR-13).');
     const cancelled = db.prepare(`UPDATE parking_reservations SET status='Cancelled' WHERE id=? AND status='Confirmed'`).run(reservationId);
     requireValue(cancelled.changes === 1, 409, 'The reservation changed. Please reload and try again.');

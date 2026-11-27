@@ -13,6 +13,7 @@ CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY,
   full_name TEXT NOT NULL,
   role TEXT NOT NULL CHECK (role IN ('Student','Operator','Simulation Operator','Admin')),
+  status TEXT NOT NULL DEFAULT 'Active',            -- 'Deactivated' accounts cannot sign in (BR-07)
   created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ','now')),
   UNIQUE(full_name, role)
 );
@@ -79,6 +80,9 @@ CREATE TABLE IF NOT EXISTS bookings (
     CHECK (pickup_deadline GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
   started_at TEXT,
   returned_at TEXT,
+  start_battery INTEGER,                              -- battery percent at pickup (trip consumption starts from it)
+  overdue_at TEXT,                                    -- when the trip passed the maximum duration (NI-11)
+  destination_hub_id TEXT REFERENCES hubs(id),        -- Hub the student said they are driving to (optional)
   created_at TEXT NOT NULL
 );
 
@@ -97,6 +101,7 @@ CREATE TABLE IF NOT EXISTS parking_reservations (
     CHECK (expires_at GLOB '[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]:[0-9][0-9]:[0-9][0-9].[0-9][0-9][0-9]Z'),
   arrived_at TEXT,
   completed_at TEXT,
+  overstay_flagged_at TEXT,                           -- vehicle still parked after the grace period (NI-09)
   created_at TEXT NOT NULL,
   CHECK (end_at > start_at)
 );
@@ -118,7 +123,9 @@ CREATE TABLE IF NOT EXISTS charging_requests (
   connect_deadline TEXT,
   charger_id TEXT REFERENCES chargers(id),
   charging_started_at TEXT,
+  start_battery INTEGER,                              -- battery percent when charging started
   charging_completed_at TEXT,
+  overstay_flagged_at TEXT,                           -- vehicle still at the charger after the grace period (NI-09)
   estimated_start_at TEXT,
   priority_score REAL DEFAULT 0,
   created_at TEXT NOT NULL
@@ -157,8 +164,75 @@ CREATE TABLE IF NOT EXISTS incidents (
   hub_id TEXT REFERENCES hubs(id),
   vehicle_id TEXT REFERENCES vehicles(id),
   summary TEXT NOT NULL,
-  status TEXT NOT NULL DEFAULT 'Open',
-  created_at TEXT NOT NULL
+  status TEXT NOT NULL DEFAULT 'Open',                -- Open -> In Progress -> Resolved
+  created_at TEXT NOT NULL,
+  category TEXT NOT NULL DEFAULT 'Vehicle fault',     -- Vehicle fault, Charger fault, Slot blocked, Safety, Other
+  severity TEXT NOT NULL DEFAULT 'Medium',            -- Low, Medium, High
+  source TEXT NOT NULL DEFAULT 'operator',            -- return, student, operator
+  charger_id TEXT REFERENCES chargers(id),
+  slot_id TEXT REFERENCES parking_slots(id),
+  reported_by TEXT,
+  assigned_to TEXT,
+  resolution_note TEXT,
+  updated_at TEXT,
+  resolved_at TEXT
+);
+
+-- Settings changed in the Admin area. They are applied on top of data/configuration.json at every start.
+CREATE TABLE IF NOT EXISTS app_settings (
+  key TEXT PRIMARY KEY,
+  value_json TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  updated_by TEXT
+);
+
+-- UC-018: an Operator moves one shared vehicle from one Hub to another.
+CREATE TABLE IF NOT EXISTS redistribution_tasks (
+  id TEXT PRIMARY KEY,
+  vehicle_id TEXT NOT NULL REFERENCES vehicles(id),
+  from_hub_id TEXT NOT NULL REFERENCES hubs(id),
+  to_hub_id TEXT NOT NULL REFERENCES hubs(id),
+  from_slot_id TEXT REFERENCES parking_slots(id),
+  to_slot_id TEXT REFERENCES parking_slots(id),      -- the free Shared slot kept for the vehicle at the destination
+  status TEXT NOT NULL CHECK (status IN ('Requested','In Progress','Done','Cancelled')),
+  reason TEXT,
+  handoff_id TEXT REFERENCES recommendation_handoffs(id),
+  requested_by TEXT NOT NULL,
+  assigned_to TEXT,
+  requested_at TEXT NOT NULL,
+  started_at TEXT,
+  completed_at TEXT,
+  CHECK (from_hub_id <> to_hub_id)
+);
+
+-- User redirection (UC-020 style advisory): an Operator asks students to use another Hub while one Hub is busy.
+CREATE TABLE IF NOT EXISTS hub_redirects (
+  id TEXT PRIMARY KEY,
+  from_hub_id TEXT NOT NULL REFERENCES hubs(id),
+  to_hub_id TEXT NOT NULL REFERENCES hubs(id),
+  reason TEXT,
+  status TEXT NOT NULL CHECK (status IN ('Active','Ended')),
+  created_by TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  ended_at TEXT,
+  CHECK (from_hub_id <> to_hub_id)
+);
+-- A Hub has at most one active redirection.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_active_redirect_per_hub ON hub_redirects(from_hub_id) WHERE status='Active';
+
+CREATE TABLE IF NOT EXISTS notifications (
+  id TEXT PRIMARY KEY,
+  user_id TEXT REFERENCES users(id),
+  audience_role TEXT,                                 -- 'Operator' reaches every Operator and Admin
+  kind TEXT NOT NULL,
+  entity_type TEXT NOT NULL,
+  entity_id TEXT NOT NULL,
+  title TEXT NOT NULL,
+  message TEXT NOT NULL,
+  severity TEXT NOT NULL DEFAULT 'info' CHECK (severity IN ('info','warning','critical')),
+  created_at TEXT NOT NULL,
+  read_at TEXT,
+  CHECK (user_id IS NOT NULL OR audience_role IS NOT NULL)
 );
 
 CREATE TABLE IF NOT EXISTS audit_logs (
@@ -223,6 +297,10 @@ CREATE INDEX IF NOT EXISTS idx_move_requests_status ON move_vehicle_requests(sta
 CREATE INDEX IF NOT EXISTS idx_violations_user_status ON violations(user_id, status, expires_at);
 CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_logs(entity_type, entity_id);
 CREATE INDEX IF NOT EXISTS idx_recommendations_run ON recommendations(run_id);
+CREATE INDEX IF NOT EXISTS idx_incidents_status ON incidents(status, created_at);
+CREATE INDEX IF NOT EXISTS idx_redistribution_status ON redistribution_tasks(status, requested_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_user ON notifications(user_id, created_at);
+CREATE INDEX IF NOT EXISTS idx_notifications_role ON notifications(audience_role, created_at);
 
 /* ---------- Rules the database itself must enforce (BR-08, BR-09, BR-36, BR-46, BR-33, BR-52) ---------- */
 -- A student has one active shared-vehicle booking (BR-09); a vehicle has one active booking (BR-08).
@@ -244,6 +322,14 @@ CREATE UNIQUE INDEX IF NOT EXISTS ux_open_move_per_request_direction
 -- The same source is never penalised twice (matches addViolation).
 CREATE UNIQUE INDEX IF NOT EXISTS ux_violation_source
   ON violations(user_id, source_type, source_id) WHERE source_type IS NOT NULL AND source_id IS NOT NULL;
+
+-- The same reminder for the same entity and addressee is stored once (NI-06, NI-09, NI-11).
+CREATE UNIQUE INDEX IF NOT EXISTS ux_notification_once
+  ON notifications(kind, entity_type, entity_id, COALESCE(user_id, ''), COALESCE(audience_role, ''));
+
+-- A vehicle is part of at most one open redistribution task.
+CREATE UNIQUE INDEX IF NOT EXISTS ux_open_redistribution_per_vehicle
+  ON redistribution_tasks(vehicle_id) WHERE status IN ('Requested','In Progress');
 
 -- A stored simulation run cannot be edited or deleted (BR-33).
 CREATE TRIGGER IF NOT EXISTS simulation_runs_no_update BEFORE UPDATE ON simulation_runs

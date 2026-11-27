@@ -1,14 +1,18 @@
 import React, { useEffect, useState } from 'react';
 import Login from './pages/Login';
 import HubDashboard from './pages/HubDashboard';
-import SharedVehicle from './pages/SharedVehicle';
-import Parking from './pages/Parking';
 import Charging from './pages/Charging';
 import Simulation from './pages/Simulation';
+import Dispatch from './pages/Dispatch';
+import Incidents from './pages/Incidents';
+import Admin from './pages/Admin';
+import Users from './pages/Users';
+import Access from './pages/Access';
+import StudentApp from './student/StudentApp';
 import AppShell from './components/AppShell';
 import { getStoredUser, setStoredUser, api, verifyStoredUser, UNAUTHORIZED_EVENT } from './api';
 
-const firstPage = user => (user?.role === 'Simulation Operator' ? 'simulation' : 'dashboard');
+const firstPage = user => (user?.role === 'Admin' ? 'users' : 'dashboard');
 
 export default function App() {
   const [user, setUser] = useState(getStoredUser());
@@ -33,6 +37,12 @@ export default function App() {
     setPage(firstPage(nextUser));
   }
 
+  // The Demo account exists with all four roles; this opens the same person under another role.
+  async function switchRole(role) {
+    try { login((await api('/auth/demo-login', { method: 'POST', body: { displayName: 'Demo', role } })).user); }
+    catch { /* the offline banner covers an unreachable server */ }
+  }
+
   function logout() {
     setStoredUser(null);
     setUser(null);
@@ -41,17 +51,23 @@ export default function App() {
 
   if (!user) return <Login onLogin={login} />;
 
+  // Students get their own large, simple app (see client/src/student). Operators and Admins keep the workspace layout.
+  if (user.role === 'Student') return <StudentApp user={user} onLogout={logout} online={apiOnline} onSwitchRole={switchRole}/>;
+
   let content;
   switch (page) {
-    case 'vehicles': content = <SharedVehicle user={user} />; break;
-    case 'parking': content = <Parking user={user} />; break;
     case 'charging': content = <Charging user={user} />; break;
+    case 'dispatch': content = <Dispatch user={user} />; break;
+    case 'incidents': content = <Incidents user={user} />; break;
+    case 'admin': content = <Admin user={user} />; break;
+    case 'users': content = <Users user={user} />; break;
+    case 'access': content = <Access user={user} />; break;
     case 'simulation': content = <Simulation user={user} />; break;
-    default: content = <HubDashboard user={user} />;
+    default: content = user.role === 'Admin' ? <Users user={user} /> : <HubDashboard user={user} />;
   }
 
   return (
-    <AppShell user={user} page={page} setPage={setPage} onLogout={logout} online={apiOnline}>
+    <AppShell user={user} page={page} setPage={setPage} onLogout={logout} online={apiOnline} onSwitchRole={switchRole}>
       {apiOnline === false && (
         <div className="feedback is-error top-error">
           Backend API is not reachable. Start the server with <code>npm run dev</code>.

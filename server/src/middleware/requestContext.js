@@ -3,14 +3,15 @@ import { HttpError, requireRole } from '../services/commonService.js';
 
 /*
  * DEMO identity only: the client sends the id of a demo account in the x-user-id header. Anyone who knows an id can
- * act as that user, so this must stay on localhost (see README). It does not model the university SSO (BR-01), the
- * 30-minute session timeout (BR-04) or deactivated accounts (BR-07).
+ * act as that user, so this must stay on localhost (see README). It does not model the university SSO (BR-01) or the
+ * 30-minute session timeout (BR-04). Deactivated accounts (BR-07) are treated as not signed in.
  */
 export function attachUser(req, _res, next) {
   const id = req.header('x-user-id');
   if (typeof id !== 'string' || !id || id.length > 100) { req.user = null; return next(); }
   // An unknown id (for example after the demo database was recreated) is treated as not signed in.
-  req.user = db.prepare('SELECT id, full_name, role FROM users WHERE id=?').get(id) || null;
+  const found = db.prepare('SELECT id, full_name, role, status FROM users WHERE id=?').get(id);
+  req.user = found && found.status === 'Active' ? { id: found.id, full_name: found.full_name, role: found.role } : null;
   next();
 }
 
