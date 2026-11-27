@@ -17,7 +17,10 @@ const limits = () => ({
   parkingReminderBeforeEndMinutes: config.reminders.parkingReminderBeforeEndMinutes,
   connectWindowMinutes: config.charging.personalConnectWindowMinutes,
   targetBatteryPercent: config.charging.targetBatteryPercent,
-  maxSessionMinutes: config.charging.maxSessionMinutes
+  maxSessionMinutes: config.charging.maxSessionMinutes,
+  minimumBatteryToBookPercent: config.booking.minimumBatteryToBookPercent,
+  pickupNoticePercent: config.charging.pickupNoticePercent,
+  pickupGraceMinutes: config.charging.pickupGraceMinutes
 });
 
 const snapshot = () => ({

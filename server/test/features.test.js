@@ -2,11 +2,11 @@ import '../testSetup.js';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { db, nowIso } from '../src/database/db.js';
-import { jump } from '../src/clock.js';
+import { jump, now as clockNow } from '../src/clock.js';
 import { config, resetConfig } from '../src/config.js';
 import { addUser, makeHub, addSlot, addCharger, addVehicle, row, notificationKinds, later } from './helpers.js';
 import { createBooking, pickupBooking, returnBooking } from '../src/services/vehicleService.js';
-import { createPersonalChargingRequest, connectPersonalVehicle, startMoveRequest, completeMoveRequest, calculatePriority } from '../src/services/chargingService.js';
+import { createPersonalChargingRequest, connectPersonalVehicle, startMoveRequest, completeMoveRequest, calculatePriority, rankQueue, runScheduler, stopAutoMove } from '../src/services/chargingService.js';
 import { runTimers, runCycle } from '../src/services/timerService.js';
 import { saveSettings, resetSettings, loadSavedSettings } from '../src/services/settingsService.js';
 import { adminOverview, updateHub, addSlots, removeSlot, addCharger as adminAddCharger, updateCharger, removeCharger,
@@ -536,4 +536,248 @@ test('User redistribution: an Operator redirects students from a busy Hub, stude
   endUserRedirect({ user: operator, redirectId: redirect.id });
   assert.ok(!activeRedirects().some(r => r.id === redirect.id));
   fail(() => endUserRedirect({ user: operator, redirectId: redirect.id }), 409);
+});
+
+/* ---------- Shared vehicles charge automatically; personal requests, bookings and Holding ---------- */
+const sharedAtHub = (hub, battery) => { const slot = addSlot(hub, 'Shared'); return addVehicle({ kind: 'shared', hubId: hub, battery, slotId: slot }); };
+const moveOf = (requestId, direction) => row('SELECT * FROM move_vehicle_requests WHERE charging_request_id=? AND direction=?', requestId, direction);
+// Lets the countdown end and the simulated Field Staff finish a move.
+const finishMoves = () => { jump(0.3); runTimers(); jump(0.6); runTimers(); };
+
+test('A free charger always takes an idle shared vehicle; the move is sent by itself; the vehicle stays bookable and gains battery', () => {
+  const hub = makeHub();
+  addSlot(hub, 'Holding');
+  const charger = addCharger(hub);
+  const vehicle = sharedAtHub(hub, 50);
+  runScheduler(hub);
+  const request = row(`SELECT * FROM charging_requests WHERE vehicle_id=?`, vehicle.id);
+  assert.equal(request.status, 'Assigned');
+  const toCharger = moveOf(request.id, 'TO_CHARGER');
+  assert.ok(toCharger.auto_send_at, 'the move has a countdown');
+  finishMoves();
+  assert.equal(row('SELECT status FROM move_vehicle_requests WHERE id=?', toCharger.id).status, 'Done');
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Charging');
+  assert.equal(row('SELECT status FROM vehicles WHERE id=?', vehicle.id).status, 'Available', 'a charging shared vehicle stays Available');
+  jump(20); runTimers();
+  assert.ok(row('SELECT battery_level FROM vehicles WHERE id=?', vehicle.id).battery_level > 50);
+  jump(240); runTimers();                         // 100% is the target
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Completed');
+  assert.equal(row('SELECT battery_level FROM vehicles WHERE id=?', vehicle.id).battery_level, 100);
+  assert.equal(row('SELECT status FROM chargers WHERE id=?', charger).status, 'Awaiting Removal');
+  assert.ok(moveOf(request.id, 'FROM_CHARGER'));
+});
+
+test('An Operator can stop the countdown of an automatic move', () => {
+  const operator = addUser('Operator');
+  const hub = makeHub();
+  addCharger(hub);
+  const vehicle = sharedAtHub(hub, 40);
+  runScheduler(hub);
+  const request = row(`SELECT * FROM charging_requests WHERE vehicle_id=?`, vehicle.id);
+  const move = moveOf(request.id, 'TO_CHARGER');
+  stopAutoMove({ user: operator, moveRequestId: move.id });
+  jump(2); runTimers();
+  const after = row('SELECT * FROM move_vehicle_requests WHERE id=?', move.id);
+  assert.equal(after.status, 'Requested');
+  assert.equal(after.sent_at, null);
+  fail(() => stopAutoMove({ user: addUser('Student'), moveRequestId: move.id }), 403);
+});
+
+test('A personal request with a higher priority takes the charger of the lowest-priority shared vehicle', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  for (let i = 0; i < 5; i++) addSlot(hub, 'Holding');
+  const charger = addCharger(hub);
+  const shared = sharedAtHub(hub, 80);
+  runScheduler(hub); finishMoves();
+  assert.equal(row('SELECT status FROM chargers WHERE id=?', charger).status, 'Charging');
+  const personal = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 10 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: personal.id, hubId: hub, batteryLevel: 10, nextRequiredUsageAt: later(2.8) });
+  assert.ok(['Queued', 'Assigned'].includes(request.status));
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, shared.id).status, 'Completed', 'the shared session stopped');
+  finishMoves();                                 // the shared vehicle is moved away, then the charger goes to the personal request
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Assigned');
+  assert.equal(row('SELECT charger_id FROM charging_requests WHERE id=?', request.id).charger_id, charger);
+});
+
+test('A booked shared vehicle leaves its charger and is never displaced', () => {
+  const student = addUser('Student');
+  const other = addUser('Student');
+  const hub = makeHub();
+  for (let i = 0; i < 5; i++) addSlot(hub, 'Holding');
+  const charger = addCharger(hub);
+  const shared = sharedAtHub(hub, 60);
+  runScheduler(hub); finishMoves();
+  assert.equal(row('SELECT status FROM chargers WHERE id=?', charger).status, 'Charging');
+
+  const booking = createBooking({ user: student, vehicleId: shared.id, pickupInMinutes: 0 });
+  assert.equal(row('SELECT status FROM vehicles WHERE id=?', shared.id).status, 'Reserved');
+  assert.equal(row('SELECT status FROM chargers WHERE id=?', charger).status, 'Awaiting Removal', 'charging stopped for the booking');
+  fail(() => pickupBooking({ user: student, bookingId: booking.id }), 409);  // still being brought back
+  finishMoves();
+  assert.equal(row('SELECT status FROM parking_slots WHERE current_vehicle_id=?', shared.id).status, 'Occupied');
+  assert.equal(pickupBooking({ user: student, bookingId: booking.id }).status, 'In Progress');
+  assert.ok(other);
+});
+
+test('Booking ahead: the pickup time and the 15-minute hold start at the chosen time; the minimum battery is 30%', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  const low = sharedAtHub(hub, 25);
+  fail(() => createBooking({ user: student, vehicleId: low.id }), 409);
+  const ok = sharedAtHub(hub, 80);
+  fail(() => createBooking({ user: student, vehicleId: ok.id, pickupInMinutes: 7 }), 400);
+  const booking = createBooking({ user: student, vehicleId: ok.id, pickupInMinutes: 15 });
+  const hold = Date.parse(booking.pickup_deadline) - Date.parse(row('SELECT pickup_from FROM bookings WHERE id=?', booking.id).pickup_from);
+  assert.equal(hold, config.booking.pickupHoldMinutes * 60000);
+  fail(() => pickupBooking({ user: student, bookingId: booking.id }), 409);   // too early
+  jump(16);
+  assert.equal(pickupBooking({ user: student, bookingId: booking.id }).status, 'In Progress');
+});
+
+test('The Holding area keeps 40% free: a request that would use more is refused', () => {
+  const hub = makeHub();
+  for (let i = 0; i < 5; i++) addSlot(hub, 'Holding');           // 3 of 5 may be used
+  addCharger(hub);
+  const shared = sharedAtHub(hub, 70);
+  runScheduler(hub); finishMoves();
+  createBooking({ user: addUser('Student'), vehicleId: shared.id, pickupInMinutes: 30 }); // booked: it cannot be displaced
+  let refused = 0;
+  for (let i = 0; i < 4; i++) {
+    const student = addUser('Student');
+    const car = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 20 });
+    try { createPersonalChargingRequest({ user: student, vehicleId: car.id, hubId: hub, batteryLevel: 20, nextRequiredUsageAt: later(1) }); }
+    catch (error) { assert.equal(error.status, 409); assert.match(error.message, /Holding/); refused++; }
+  }
+  assert.equal(refused, 1);
+});
+
+test('A personal vehicle that is not collected 5 minutes after 100% is moved to Holding (a warning, no points)', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  addSlot(hub, 'Holding');
+  const charger = addCharger(hub);
+  const car = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 80 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: car.id, hubId: hub, batteryLevel: 80, nextRequiredUsageAt: later(2) });
+  assert.equal(request.status, 'Assigned');
+  connectPersonalVehicle({ user: student, requestId: request.id });
+  jump(25); runTimers();
+  assert.ok(notificationKinds(student.id).includes('charging_pickup_notice'), 'told at 90%');
+  jump(20); runTimers();
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Completed');
+  const points = row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n;
+  jump(config.charging.pickupGraceMinutes + 1); runTimers();
+  assert.equal(row('SELECT destination FROM move_vehicle_requests WHERE charging_request_id=? AND direction=?', request.id, 'FROM_CHARGER').destination, 'Holding');
+  finishMoves(); jump(0.6); runTimers();
+  assert.equal(row('SELECT status FROM vehicles WHERE id=?', car.id).status, 'Parked');
+  assert.notEqual(row('SELECT status FROM chargers WHERE id=?', charger).status, 'Awaiting Removal');
+  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, points, 'no violation point is recorded');
+});
+
+/* ---------- Priority: slack-based urgency and the displacement margin (worst cases) ---------- */
+test('Priority: urgency uses slack (time left minus charging time); a deadline that can still be missed by a little is class H, one that cannot be met is class X; no time = no urgency', () => {
+  const at = minutes => new Date(clockNow() + minutes * 60000).toISOString();
+  const base = { vehicle_type: 'Car', registered_at: nowIso() };
+  // Car: 7.2 kW charger, 24 kWh, so 40% -> 100% takes 120 minutes and 90% -> 100% takes 20 minutes.
+  const longJob = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(130) });   // slack about 10
+  const shortJob = calculatePriority({ ...base, battery_level: 90, next_required_usage_at: at(60) });   // slack about 40
+  assert.ok(longJob.components.urgency > shortJob.components.urgency, 'the long job with little spare time is more urgent');
+  assert.ok(Math.abs(longJob.components.slack - 10) < 0.5);
+  const late = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(110) });      // needs 120 min, has 110: late by 10, can still be saved
+  assert.equal(late.cls, 'H');
+  assert.equal(late.components.urgency, 100);
+  const impossible = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(30) }); // needs 120 min, has 30: late by 90
+  assert.equal(impossible.cls, 'X', 'it cannot be saved any more');
+  assert.equal(impossible.components.urgency, 100);
+  assert.ok(impossible.components.slack < 0);
+  const overdue = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(-30) });   // time already passed
+  assert.equal(overdue.cls, 'X');
+  assert.ok(Number.isFinite(overdue.score) && overdue.components.urgency === 100);
+  const unknown = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: null });
+  assert.equal(unknown.components.urgency, 0);
+  assert.equal(unknown.components.slack, null);
+  assert.equal(unknown.cls, 'L');
+  const fullAlready = calculatePriority({ ...base, battery_level: 100, next_required_usage_at: at(1) });
+  assert.equal(fullAlready.cls, 'L', 'a full vehicle is never class H');
+  assert.ok(Number.isFinite(calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(130), vehicle_type: 'Unknown' }).score), 'an unknown vehicle type uses the default capacity');
+});
+
+test('Priority: a personal request that is only slightly ahead does not displace a charging shared vehicle', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  for (let i = 0; i < 5; i++) addSlot(hub, 'Holding');
+  const charger = addCharger(hub);
+  const shared = sharedAtHub(hub, 50);
+  runScheduler(hub); finishMoves();
+  assert.equal(row('SELECT status FROM chargers WHERE id=?', charger).status, 'Charging');
+  const personal = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 45 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: personal.id, hubId: hub, batteryLevel: 45, nextRequiredUsageAt: later(10) });
+  assert.equal(request.status, 'Queued', 'the margin protects the running session');
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, shared.id).status, 'Charging');
+});
+
+test('Priority: a shared vehicle at 90% or more is never displaced; the next lowest one is', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  for (let i = 0; i < 6; i++) addSlot(hub, 'Holding');
+  const c1 = addCharger(hub); const c2 = addCharger(hub);
+  const nearlyFull = sharedAtHub(hub, 92);
+  const middle = sharedAtHub(hub, 60);
+  runScheduler(hub); finishMoves();
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, nearlyFull.id).status, 'Charging');
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, middle.id).status, 'Charging');
+  const personal = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 10 });
+  createPersonalChargingRequest({ user: student, vehicleId: personal.id, hubId: hub, batteryLevel: 10, nextRequiredUsageAt: later(2.8) });
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, nearlyFull.id).status, 'Charging', 'the 92% vehicle keeps charging');
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, middle.id).status, 'Completed', 'the 60% vehicle gave way');
+  assert.ok(c1 && c2);
+});
+
+test('Priority: when every charger holds a vehicle at 90% or more, the personal request waits and gets the first free charger', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  for (let i = 0; i < 5; i++) addSlot(hub, 'Holding');
+  const charger = addCharger(hub);
+  const nearlyFull = sharedAtHub(hub, 95);
+  runScheduler(hub); finishMoves();
+  const personal = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 10 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: personal.id, hubId: hub, batteryLevel: 10, nextRequiredUsageAt: later(2.8) });
+  assert.equal(request.status, 'Queued');
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, nearlyFull.id).status, 'Charging');
+  jump(30); runTimers(); finishMoves(); runScheduler(hub); finishMoves();   // the shared vehicle reaches 100% and leaves
+  assert.equal(row('SELECT charger_id FROM charging_requests WHERE id=?', request.id).charger_id, charger);
+});
+
+test('Priority: a vehicle that cannot be saved (class X) is ranked behind the others and does not displace anyone', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  for (let i = 0; i < 6; i++) addSlot(hub, 'Holding');
+  const charger = addCharger(hub);
+  // Only one charger. A cannot be ready in time (needs 140 min, has 100), B can still make it (needs 40 min, has 50).
+  const a = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 30 });
+  const bOwner = addUser('Student');
+  const b = addVehicle({ kind: 'personal', hubId: hub, ownerId: bOwner.id, battery: 80 });
+  const busy = addVehicle({ kind: 'personal', hubId: hub, ownerId: addUser('Student').id, battery: 50 });
+  const first = createPersonalChargingRequest({ user: db.prepare('SELECT * FROM users WHERE id=?').get(busy.owner_id), vehicleId: busy.id, hubId: hub, batteryLevel: 50, nextRequiredUsageAt: later(10) });
+  assert.equal(first.status, 'Assigned');
+  const ra = createPersonalChargingRequest({ user: student, vehicleId: a.id, hubId: hub, batteryLevel: 30, nextRequiredUsageAt: later(100 / 60) });
+  const rb = createPersonalChargingRequest({ user: bOwner, vehicleId: b.id, hubId: hub, batteryLevel: 80, nextRequiredUsageAt: later(50 / 60) });
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', ra.id).status, 'Queued', 'A is X and does not displace the vehicle that is charging');
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', rb.id).status, 'Queued');
+  const ranked = rankQueue(hub);
+  assert.equal(ranked[0].id, rb.id, 'B (can still be saved) goes first');
+  assert.equal(ranked[1].id, ra.id, 'A (cannot be saved) goes behind');
+  assert.equal(ranked[1].cls, 'X');
+  assert.ok(charger);
+});
+
+test('Priority: a class X vehicle is still charged when nobody else needs the charger', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  const charger = addCharger(hub);
+  const car = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 30 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: car.id, hubId: hub, batteryLevel: 30, nextRequiredUsageAt: later(30 / 60) }); // needs 140 min, has 30
+  assert.equal(calculatePriority({ battery_level: 30, vehicle_type: 'Car', next_required_usage_at: later(30 / 60), registered_at: nowIso() }).cls, 'X');
+  assert.equal(request.status, 'Assigned');
+  assert.equal(row('SELECT charger_id FROM charging_requests WHERE id=?', request.id).charger_id, charger);
 });

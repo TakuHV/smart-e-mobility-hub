@@ -127,6 +127,7 @@ CREATE TABLE IF NOT EXISTS charging_requests (
   charging_completed_at TEXT,
   overstay_flagged_at TEXT,                           -- vehicle still at the charger after the grace period (NI-09)
   estimated_start_at TEXT,
+  available_from TEXT,                                -- a request registered ahead of time waits until this moment
   priority_score REAL DEFAULT 0,
   created_at TEXT NOT NULL
 );
@@ -142,7 +143,10 @@ CREATE TABLE IF NOT EXISTS move_vehicle_requests (
   requested_at TEXT NOT NULL,
   started_at TEXT,
   completed_at TEXT,
-  note TEXT
+  note TEXT,
+  auto_send_at TEXT,                                  -- the request is sent by itself at this time unless an Operator stops it
+  sent_at TEXT,
+  destination TEXT NOT NULL DEFAULT 'Slot'            -- 'Slot' (Shared slot or Personal slot) or 'Holding'
 );
 
 CREATE TABLE IF NOT EXISTS violations (

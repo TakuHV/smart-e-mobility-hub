@@ -24,7 +24,8 @@ export function minutesToReach(targetPercent, currentPercent, powerKw, vehicleTy
 }
 
 // Battery percent during a trip, elapsedMs after pickup.
+// A trip between two Hubs uses tripDropPercent on average (20%); the drop is spread over tripDropMinutes and then stays.
 export function tripBattery(startPercent, vehicleType, elapsedMs) {
-  const drop = ((tripConsumptionKw(vehicleType) * Math.max(0, elapsedMs)) / HOUR_MS / capacityKwh(vehicleType)) * 100;
-  return Math.max(0, Number(startPercent) - drop);
+  const share = Math.min(1, Math.max(0, elapsedMs) / (B.tripDropMinutes * 60000));
+  return Math.max(0, Number(startPercent) - B.tripDropPercent * share);
 }

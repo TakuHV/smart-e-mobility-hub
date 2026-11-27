@@ -1,6 +1,6 @@
 import { db, transaction, makeId, nowIso } from '../database/db.js';
 import { HttpError, requireValue, getViolationSummary, inHubOperatingHours, auditChange, addViolation } from './commonService.js';
-import { enqueueSharedVehicle } from './chargingService.js';
+import { enqueueSharedVehicle, settleBookedChargingVehicles } from './chargingService.js';
 import { notifyOperators } from './notificationService.js';
 
 
@@ -51,7 +51,8 @@ export function listBookings(user) {
 }
 
 // UC-005. Every state-dependent check runs inside the transaction that writes the booking (BR-08, BR-36).
-export function createBooking({ user, vehicleId, destinationHubId = null }) {
+export function createBooking({ user, vehicleId, destinationHubId = null, pickupInMinutes = 0 }) {
+  requireValue([0, 5, 15, 30].includes(Number(pickupInMinutes)), 400, 'Choose to pick up now, or in 5, 15 or 30 minutes.');
   requireValue(user?.role === 'Student', 403, 'Only students can book shared vehicles.');
   const restriction = getViolationSummary(user.id);
   requireValue(!restriction.suspended, 403,
@@ -72,12 +73,15 @@ export function createBooking({ user, vehicleId, destinationHubId = null }) {
     requireValue(vehicle.status === 'Available' && vehicle.battery_level >= config.booking.minimumBatteryToBookPercent, 409,
       `Only an Available shared vehicle with at least ${config.booking.minimumBatteryToBookPercent}% battery can be booked (BR-10).`);
 
-    const deadline = new Date(clockNow() + config.booking.pickupHoldMinutes * 60 * 1000).toISOString();
+    const pickupFrom = new Date(clockNow() + Number(pickupInMinutes) * 60 * 1000).toISOString();
+    const deadline = new Date(clockNow() + (Number(pickupInMinutes) + config.booking.pickupHoldMinutes) * 60 * 1000).toISOString();
     const reserved = db.prepare(`UPDATE vehicles SET status='Reserved', updated_at=?
       WHERE id=? AND status='Available' AND battery_level>=?`).run(now, vehicleId, config.booking.minimumBatteryToBookPercent);
     requireValue(reserved.changes === 1, 409, 'Vehicle availability changed. Please select another vehicle.');
-    // BR-39: the Shared slot kept for the vehicle is released when a student books it.
-    db.prepare(`UPDATE parking_slots SET status='Available', current_vehicle_id=NULL, updated_at=?
+    // BR-39: the Shared slot kept for the vehicle is released when a student books it. A vehicle that is on a charger
+    // keeps its slot until the student picks it up (it is moved back to that slot first).
+    const onCharger = db.prepare(`SELECT 1 FROM charging_requests WHERE vehicle_id=? AND status IN ('Assigned','Charging')`).get(vehicleId);
+    if (!onCharger) db.prepare(`UPDATE parking_slots SET status='Available', current_vehicle_id=NULL, updated_at=?
       WHERE current_vehicle_id=? AND slot_type='Shared'`).run(now, vehicleId);
     if (destinationHubId) {
       const destination = db.prepare('SELECT * FROM hubs WHERE id=?').get(destinationHubId);
@@ -87,11 +91,14 @@ export function createBooking({ user, vehicleId, destinationHubId = null }) {
       const freeSlots = db.prepare(`SELECT COUNT(*) AS n FROM parking_slots WHERE hub_id=? AND slot_type='Shared' AND status='Available'`).get(destinationHubId).n;
       requireValue(freeSlots > 0, 409, `${destination.name} has no free Shared slot right now. Choose another Hub.`);
     }
-    db.prepare(`INSERT INTO bookings (id,user_id,vehicle_id,hub_id,status,pickup_deadline,created_at,destination_hub_id)
-      VALUES (?,?,?,?, 'Confirmed', ?, ?, ?)`)
-      .run(bookingId, user.id, vehicleId, vehicle.hub_id, deadline, now, destinationHubId || null);
-    auditChange('Booking', bookingId, 'BOOKING_CONFIRMED', { vehicleId, pickupDeadline: deadline, destinationHubId }, user.id);
+    db.prepare(`INSERT INTO bookings (id,user_id,vehicle_id,hub_id,status,pickup_deadline,created_at,destination_hub_id,pickup_from)
+      VALUES (?,?,?,?, 'Confirmed', ?, ?, ?, ?)`)
+      .run(bookingId, user.id, vehicleId, vehicle.hub_id, deadline, now, destinationHubId || null, pickupFrom);
+    // The vehicle's next use is the pickup time; a booked vehicle never keeps a place in the charging queue.
+    db.prepare('UPDATE vehicles SET next_required_usage_at=? WHERE id=?').run(pickupFrom, vehicleId);
+    auditChange('Booking', bookingId, 'BOOKING_CONFIRMED', { vehicleId, pickupFrom, pickupDeadline: deadline, destinationHubId }, user.id);
   });
+  settleBookedChargingVehicles();
   return db.prepare(`SELECT b.*, v.plate, h.name AS hub_name FROM bookings b
     JOIN vehicles v ON v.id=b.vehicle_id JOIN hubs h ON h.id=b.hub_id WHERE b.id=?`).get(bookingId);
 }
@@ -119,6 +126,12 @@ export function pickupBooking({ user, bookingId }) {
       return; // commit the expiry
     }
     requireValue(booking.vehicle_status === 'Reserved', 409, 'The reserved vehicle is not available.');
+    const from = Date.parse(booking.pickup_from || booking.created_at);
+    requireValue(clockNow() >= from, 409, `Pickup starts at ${new Date(from).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit', timeZone: 'Asia/Ho_Chi_Minh' })}. Please wait.`);
+    requireValue(!db.prepare(`SELECT 1 FROM charging_requests WHERE vehicle_id=? AND status IN ('Assigned','Charging')`).get(booking.vehicle_id)
+      && !db.prepare(`SELECT 1 FROM move_vehicle_requests WHERE vehicle_id=? AND direction='FROM_CHARGER' AND status IN ('Requested','In Progress')`).get(booking.vehicle_id),
+      409, 'The vehicle is still being brought back from the charger. Please wait a moment.');
+    db.prepare(`UPDATE parking_slots SET status='Available', current_vehicle_id=NULL, updated_at=? WHERE current_vehicle_id=? AND slot_type='Shared'`).run(now, booking.vehicle_id);
     // start_battery is the starting point of the trip's battery consumption (NI-11); without it the timer would subtract from an already reduced level.
     const started = db.prepare(`UPDATE bookings SET status='In Progress', started_at=?,
       start_battery=(SELECT battery_level FROM vehicles WHERE id=bookings.vehicle_id) WHERE id=? AND status='Confirmed'`).run(now, bookingId);

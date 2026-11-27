@@ -1,8 +1,11 @@
 import { useState } from 'react';
 import { api } from '../api';
-import { useClockState } from '../clock';
+import { useClockState, useNow } from '../clock';
 import { Countdown, ElapsedBar } from '../components/Timers';
-import { BackHeader, Battery, Choice, useLoad, useAction, hubHint } from './ui';
+import { BackHeader, Battery, Choice, Chips, useLoad, useAction, hubHint } from './ui';
+
+const PICKUP = [{ value: 0, label: 'Now' }, { value: 5, label: 'In 5 min' }, { value: 15, label: 'In 15 min' }, { value: 30, label: 'In 30 min' }];
+const hhmm = value => new Date(value).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 
 /*
  * Book a vehicle, one question per screen:
@@ -11,6 +14,8 @@ import { BackHeader, Battery, Choice, useLoad, useAction, hubHint } from './ui';
  */
 export default function BookFlow({ onClose }) {
   const { limits } = useClockState();
+  const now = useNow();
+  const [pickupIn, setPickupIn] = useState(0);
   const [data, setData] = useState(null);
   const [step, setStep] = useState(1);
   const [fromHub, setFromHub] = useState('');
@@ -32,7 +37,7 @@ export default function BookFlow({ onClose }) {
   if (!data) return <><BackHeader title="Book a vehicle" onBack={onClose}/>{error ? <div className="stu-error">{error}</div> : <p>Loading…</p>}</>;
 
   const active = data.bookings.find(b => ['Confirmed', 'In Progress', 'Overdue'].includes(b.status));
-  const minBattery = 20;
+  const minBattery = limits?.minimumBatteryToBookPercent ?? 30;
   const hubName = id => data.hubs.find(h => h.id === id)?.name || '';
   const freeSlotsAt = id => data.slots.filter(s => s.hub_id === id && s.status === 'Available').length;
   const vehiclesAt = id => data.vehicles.filter(v => v.hub_id === id && v.status === 'Available' && v.battery_level >= minBattery);
@@ -49,12 +54,14 @@ export default function BookFlow({ onClose }) {
     <BackHeader title="Pick up your vehicle" onBack={onClose}/>
     <div className="stu-card highlight">
       <div className="trip-big"><div className="emoji">🛵</div><h2>{active.plate}</h2><p>Waiting for you at <b>{active.hub_name}</b></p></div>
-      <div style={{ textAlign: 'center' }}><Countdown until={active.pickup_deadline} label="Pick up within" overLabel="expired" warnSeconds={180}/></div>
+      {active.pickup_from && now < Date.parse(active.pickup_from) - 1000
+        ? <div style={{ textAlign: 'center' }}><Countdown until={active.pickup_from} label={`You can pick up from ${hhmm(active.pickup_from)} in`} warnSeconds={0}/></div>
+        : <div style={{ textAlign: 'center' }}><Countdown until={active.pickup_deadline} label="Pick up within" overLabel="expired" warnSeconds={180}/></div>}
       <Battery level={active.battery_level}/>
       {active.destination_hub_name && <p>Going to: <b>{active.destination_hub_name}</b></p>}
     </div>
     {error && <div className="stu-error">{error}</div>}
-    <button className="stu-btn" disabled={busy} onClick={() => run(async () => { await api(`/vehicles/bookings/${active.id}/pickup`, { method: 'POST', body: {} }); await load(); })}>I have the vehicle — start trip</button>
+    <button className="stu-btn" disabled={busy || (active.pickup_from && now < Date.parse(active.pickup_from) - 1000)} onClick={() => run(async () => { await api(`/vehicles/bookings/${active.id}/pickup`, { method: 'POST', body: {} }); await load(); })}>I have the vehicle — start trip</button>
     <button className="stu-btn danger" disabled={busy} onClick={() => run(async () => { await api(`/vehicles/bookings/${active.id}/cancel`, { method: 'POST', body: {} }); await load(); })}>Cancel booking</button>
   </>;
 
@@ -90,8 +97,8 @@ export default function BookFlow({ onClose }) {
   const back = () => (step === 1 ? onClose() : setStep(step - 1));
   const chosen = data.vehicles.find(v => v.id === vehicleId);
   const confirm = async () => {
-    const r = await run(() => api('/vehicles/bookings', { method: 'POST', body: { vehicleId, destinationHubId: toHub } }));
-    if (r) { setStep(1); setFromHub(''); setVehicleId(''); setToHub(''); await load(); window.scrollTo({ top: 0 }); }
+    const r = await run(() => api('/vehicles/bookings', { method: 'POST', body: { vehicleId, destinationHubId: toHub, pickupInMinutes: pickupIn } }));
+    if (r) { setPickupIn(0); setStep(1); setFromHub(''); setVehicleId(''); setToHub(''); await load(); window.scrollTo({ top: 0 }); }
   };
 
   return <>
@@ -114,6 +121,7 @@ export default function BookFlow({ onClose }) {
         <Battery level={chosen.battery_level}/>
         <div><small>To</small><h2>{hubName(toHub)}</h2></div>
       </div>
+      <div className="stu-card"><b>When will you pick it up?</b><Chips value={pickupIn} onChange={setPickupIn} options={PICKUP}/></div>
       <div className="stu-note">After booking you have {limits?.pickupHoldMinutes ?? 15} minutes to pick up the vehicle.</div>
       <button className="stu-btn" disabled={busy} onClick={confirm}>Confirm booking</button>
     </>}

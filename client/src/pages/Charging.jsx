@@ -18,7 +18,7 @@ export default function Charging({ user }) {
   const [vehicleId, setVehicleId] = useState('');
   const [battery, setBattery] = useState(35);
   const [nextUse, setNextUse] = useState(isoToLocalInput(new Date(virtualNow() + 90 * 60000)));
-  const [data, setData] = useState({ requests: [], chargers: [], moveRequests: [] });
+  const [data, setData] = useState({ requests: [], chargers: [], moveRequests: [], holding: [], holdingVehicles: [] });
   const [error, setError] = useState('');
   const [success, setSuccess] = useState('');
   const isOperator = ['Operator', 'Admin'].includes(user.role);
@@ -37,7 +37,7 @@ export default function Charging({ user }) {
     } catch (err) { if (silent !== true) setError(err.message); }
   }
   useEffect(() => { load(); }, []);
-  useAutoRefresh(load, 15);
+  useAutoRefresh(load, 5);
 
   async function register(event) {
     event.preventDefault(); setError(''); setSuccess('');
@@ -94,11 +94,11 @@ export default function Charging({ user }) {
           <thead><tr><th>Vehicle</th><th>Hub</th><th className="num">Battery</th><th>Next use</th><th>Status</th><th>Action</th></tr></thead>
           <tbody>{data.requests.map(r => <tr key={r.id}>
             <td className="primary"><strong>{r.plate}</strong><small>{r.request_type === 'shared_automatic' ? 'Shared · automatic' : 'Personal'}{r.priority_class ? ` · class ${r.priority_class}` : ''} · score {Number(r.priority_score || 0).toFixed(1)}</small></td>
-            <td data-label="Hub">{r.hub_name}</td><td className="num" data-label="Battery">{r.battery_level}%</td><td data-label="Next use">{fmtDateTime(r.next_required_usage_at)}</td>
+            <td data-label="Hub">{r.hub_name}</td><td className="num" data-label="Battery">{Math.round(r.status === 'Charging' ? r.vehicle_battery : r.battery_level)}%</td><td data-label="Next use">{fmtDateTime(r.next_required_usage_at)}</td>
             <td data-label="Status"><StatusBadge value={r.status}/><small>{r.charger_code || (r.estimated_start_at ? `Est. start ${fmtTime(r.estimated_start_at)}` : 'Estimate pending')}</small>
               {r.status === 'Assigned' && r.connect_deadline && r.request_type === 'personal' && <small><Countdown until={r.connect_deadline} label="Connect within" overLabel="expired"/></small>}
               {r.status === 'Queued' && r.estimated_start_at && <small><Countdown until={r.estimated_start_at} label="Est. start in" overLabel="due" warnSeconds={0}/></small>}
-              {r.status === 'Charging' && r.charging_started_at && <ElapsedBar since={r.charging_started_at} limitMinutes={limits?.maxSessionMinutes || undefined} label={`Charging ${r.battery_level}% → ${limits?.targetBatteryPercent ?? 90}%`}/>}
+              {r.status === 'Charging' && r.charging_started_at && <ElapsedBar since={r.charging_started_at} limitMinutes={limits?.maxSessionMinutes || undefined} label={`Charging ${Math.round(r.vehicle_battery)}% → ${limits?.targetBatteryPercent ?? 100}%`}/>}
               {r.overstay_flagged_at && <small className="countdown is-over">Still at charger — move it away</small>}</td>
             <td className="actions"><div className="button-row">
               {r.status === 'Assigned' && r.request_type === 'personal' && r.user_id === user.id && <button className="button small primary" onClick={() => action(`/charging/requests/${r.id}/connect`, 'Vehicle connected. Charging session started.')}>Connect vehicle</button>}
@@ -108,16 +108,24 @@ export default function Charging({ user }) {
         </table></div>}
       </section>
     </div>
+    {isOperator && <section className="card-surface padded section-gap"><div className="subsection-title"><strong>Holding area</strong><span>At least {data.holding[0]?.freeReservePercent ?? 40}% of the slots stay free</span></div>
+      <div className="charger-list large">{data.holding.map(h => <div className="charger-row" key={h.hubId}><div><strong>{h.hubName}</strong><small>{h.occupied} in Holding · {h.waiting} waiting for a charger</small></div><span>{h.occupied + h.waiting} of {h.usable} usable places taken ({h.total} slots)</span><StatusBadge value={h.occupied + h.waiting >= h.usable ? 'Full' : 'Open'}/></div>)}</div>
+      {data.holdingVehicles.map(v => <div className="attention-item" key={v.slot_id}><div><strong>{v.plate} · {v.slot_code}</strong><span>{v.hub_name} · {Math.round(v.battery_level)}% · not collected after charging</span></div>
+        <button className="button small primary" onClick={() => action(`/charging/holding/${v.slot_id}/release`, 'Vehicle handed back.')}>Hand back</button></div>)}
+    </section>}
     <div className="content-grid two-col section-gap">
       <section className="card-surface padded"><div className="subsection-title"><strong>Charger status</strong><span>Shared charging area per Hub</span></div>
-        <div className="charger-list large">{data.chargers.map(c => <div className="charger-row" key={c.id}><div><strong>{c.code}</strong><small>{c.hub_name} · {c.power_kw} kW</small></div><span>{c.vehicle_plate || 'No vehicle'}</span><StatusBadge value={c.status}/></div>)}</div>
+        <div className="charger-list large">{data.chargers.map(c => <div className="charger-row" key={c.id}><div><strong>{c.code}</strong><small>{c.hub_name} · {c.power_kw} kW</small></div>
+          <span>{c.vehicle_plate || 'No vehicle'}{c.vehicle_plate && c.vehicle_battery != null && <span className="battery-inline"><span className="battery-track"><i style={{ width: `${Math.round(c.vehicle_battery)}%` }}/></span><b>{Math.round(c.vehicle_battery)}%</b></span>}</span><StatusBadge value={c.status}/></div>)}</div>
       </section>
       <section className="card-surface padded"><div className="subsection-title"><strong>Move Vehicle Requests</strong><span>A charger is released only when the removal is Done</span></div>
         {data.moveRequests.length === 0 ? <EmptyState title="No movement requests" description="Shared vehicle charger assignments and completed charging sessions create movement requests."/> : <div className="move-list">{data.moveRequests.map(m => {
           const canAct = isOperator || myVehicleIds.has(m.vehicle_id);
           return <div className="move-card" key={m.id}>
-            <div className="move-card-head"><div><strong>{m.plate}</strong><small>{m.direction === 'TO_CHARGER' ? 'Move to charger' : 'Move away from charger'} · {m.charger_code}</small></div><StatusBadge value={m.status}/></div>
+            <div className="move-card-head"><div><strong>{m.plate}</strong><small>{m.direction === 'TO_CHARGER' ? 'Move to charger' : m.destination === 'Holding' ? 'Move to Holding area' : 'Move away from charger'} · {m.charger_code}</small>
+              {m.status === 'Requested' && m.auto_send_at && !m.sent_at && <small><Countdown until={m.auto_send_at} label="Sending automatically in" overLabel="sending" warnSeconds={5}/></small>}</div><StatusBadge value={m.status}/></div>
             <div className="move-card-foot"><span>{m.hub_name}</span>{canAct && <div className="button-row">
+              {isOperator && m.status === 'Requested' && m.auto_send_at && !m.sent_at && <button className="button small danger" onClick={() => action(`/charging/move-requests/${m.id}/stop`, 'Automatic sending stopped. Handle this request by hand.')}>Stop</button>}
               {m.status === 'Requested' && <button className="button small ghost" onClick={() => action(`/charging/move-requests/${m.id}/start`, 'Move Vehicle Request is now In Progress.')}>Start</button>}
               {m.status === 'In Progress' && <button className="button small primary" onClick={() => action(`/charging/move-requests/${m.id}/done`, 'Movement confirmed. Charger state has been updated.')}>Confirm Done</button>}
               {isOperator && m.status === 'Requested' && m.direction === 'TO_CHARGER' && <button className="button small ghost" onClick={() => action(`/charging/move-requests/${m.id}/cancel`, 'Move request cancelled. The charging request returned to the queue.')}>Cancel</button>}
