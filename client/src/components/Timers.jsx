@@ -1,13 +1,15 @@
 import { useNow, formatDuration } from '../clock';
 
 // Counts down to `until` (ISO text) on the demo clock. Turns amber under `warnSeconds` and red when over.
-export function Countdown({ until, label = '', warnSeconds = 300, overLabel = 'overdue' }) {
+// With showOverTime={false} the display stops at the end instead of counting up (for "sending now" style states).
+export function Countdown({ until, label = '', warnSeconds = 300, overLabel = 'overdue', showOverTime = true, compact = false, className = '' }) {
   const now = useNow();
   if (!until) return null;
   const left = Date.parse(until) - now;
   const cls = left <= 0 ? 'is-over' : left <= warnSeconds * 1000 ? 'is-warn' : '';
-  return <span className={`countdown ${cls}`} title={new Date(until).toLocaleString()}>
-    {left > 0 ? <>{label && <small>{label}</small>}<b>{formatDuration(left)}</b></> : <>{label && <small>{label}</small>}<b>{overLabel} {formatDuration(-left)}</b></>}
+  const shown = ms => (compact && ms < 60000 ? `${Math.max(0, Math.ceil(ms / 1000))}s` : formatDuration(ms));
+  return <span className={`countdown ${cls} ${className}`} title={new Date(until).toLocaleString()}>
+    {left > 0 ? <>{label && <small>{label}</small>}<b>{shown(left)}</b></> : <>{label && <small>{label}</small>}<b>{showOverTime ? `${overLabel} ${formatDuration(-left)}` : overLabel}</b></>}
   </span>;
 }
 

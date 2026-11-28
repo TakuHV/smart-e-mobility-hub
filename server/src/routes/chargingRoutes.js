@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import { asyncRoute, requireLogin, requireRoles, pick } from '../middleware/requestContext.js';
-import { createPersonalChargingRequest, listChargingData, connectPersonalVehicle, completeCharging,
-  startMoveRequest, completeMoveRequest, cancelMoveRequest, runScheduler, updateNextRequiredUsage, stopAutoMove, releaseHolding } from '../services/chargingService.js';
+import { createPersonalChargingRequest, previewPersonalCharging, listChargingData, connectPersonalVehicle, completeCharging,
+  startMoveRequest, completeMoveRequest, cancelMoveRequest, runScheduler, updateNextRequiredUsage, stopAutoMove, resumeAutoMove, releaseHolding } from '../services/chargingService.js';
 import { HttpError } from '../services/commonService.js';
 
 // The authenticated user and the ids in the URL always come last, so a request body can never replace them.
@@ -9,6 +9,10 @@ const router = Router();
 router.use(requireLogin);
 
 router.get('/queue', asyncRoute((req, res) => res.json(listChargingData(req.user))));
+
+router.post('/preview', asyncRoute((req, res) => res.json(
+  previewPersonalCharging(pick(req.body, ['vehicleId', 'hubId', 'batteryLevel', 'nextRequiredUsageAt', 'startInMinutes']))
+)));
 
 router.post('/requests', asyncRoute((req, res) => res.status(201).json({
   request: createPersonalChargingRequest({
@@ -51,6 +55,13 @@ router.post('/move-requests/:moveRequestId/done', asyncRoute((req, res) => res.j
 router.post('/holding/:slotId/release', asyncRoute((req, res) => res.json(releaseHolding({ user: req.user, slotId: req.params.slotId }))));
 router.post('/move-requests/:moveRequestId/stop', asyncRoute((req, res) => res.json({
   moveRequest: stopAutoMove({ user: req.user, moveRequestId: req.params.moveRequestId })
+})));
+// Pause = the old "stop" (the countdown is frozen and the request waits); resume starts the countdown again.
+router.post('/move-requests/:moveRequestId/pause', asyncRoute((req, res) => res.json({
+  moveRequest: stopAutoMove({ user: req.user, moveRequestId: req.params.moveRequestId })
+})));
+router.post('/move-requests/:moveRequestId/resume', asyncRoute((req, res) => res.json({
+  moveRequest: resumeAutoMove({ user: req.user, moveRequestId: req.params.moveRequestId })
 })));
 router.post('/move-requests/:moveRequestId/cancel', asyncRoute((req, res) => res.json({
   moveRequest: cancelMoveRequest({ user: req.user, moveRequestId: req.params.moveRequestId })

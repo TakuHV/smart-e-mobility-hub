@@ -22,6 +22,9 @@
     "fieldMoveSeconds": 30,
     "returnLeadMinutes": 2,
     "stopCooldownMinutes": 15,
+    "sharedMandatoryBelowPercent": 60,
+    "sharedStopPercent": 90,
+    "sharedRestMinutes": 10,
     "personalRequestsPerVehiclePerDay": 2,
     "personalConnectWindowMinutes": 15,
     "scheduler": {
@@ -40,8 +43,8 @@
   "status": { "staleAfterMinutes": 2, "refreshIntervalSeconds": 60 },
 
   "demoData": {
-    "note": "Seed values for the classroom demonstration; they are not approved operating parameters. The Central Hub limit equals one charger so that the Hub Power Limit rule is visible in the demo.",
-    "seedHubPowerLimitsKw": { "hub-central": 3, "hub-engineering": 3, "hub-library": 3 },
+    "note": "Seed values for the classroom demonstration; they are not approved operating parameters. All three Hubs have the same 5 kW limit for five 1 kW chargers, so all chargers run together in normal operation; the limit only binds in a what-if run (for example a power outage with a smaller backup supply).",
+    "seedHubPowerLimitsKw": { "hub-central": 5, "hub-engineering": 5, "hub-library": 5 },
     "seedChargerPowerKw": 1
   }
 }

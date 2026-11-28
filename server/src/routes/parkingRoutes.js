@@ -16,7 +16,8 @@ router.get('/slots', asyncRoute((req, res) => {
   if (slotType && !SLOT_TYPES.includes(slotType)) throw new HttpError(400, `slotType must be one of: ${SLOT_TYPES.join(', ')}.`);
   const slots = listSlots({
     hubId: text(req.query.hubId), slotType,
-    startAt: text(req.query.startAt), endAt: text(req.query.endAt), vehicleType: text(req.query.vehicleType)
+    startAt: text(req.query.startAt), endAt: text(req.query.endAt), vehicleType: text(req.query.vehicleType),
+    withOccupant: req.user.role !== 'Student'
   });
   // A student does not see which vehicle occupies a slot (BR-07).
   res.json({ slots: req.user.role === 'Student' ? slots.map(({ current_vehicle_id, ...slot }) => slot) : slots });

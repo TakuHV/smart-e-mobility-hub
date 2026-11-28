@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { api } from '../api';
-import { virtualNow, useClockState } from '../clock';
+import { virtualNow, useClockState, skipDemoSeconds } from '../clock';
 import { Countdown, ElapsedBar } from '../components/Timers';
 import { BackHeader, Battery, Choice, Chips, TimeFields, toInt, todayAt, clockText, useLoad, useAction } from './ui';
 
@@ -20,6 +20,9 @@ export default function ChargeFlow({ user, onClose }) {
   const [needH, setNeedH] = useState(() => pad2(new Date(virtualNow() + 2 * 3600000).getHours()));
   const [needM, setNeedM] = useState(() => pad2(new Date(virtualNow() + 2 * 3600000).getMinutes()));
   const [message, setMessage] = useState('');
+  const [adding, setAdding] = useState(false);
+  const [plate, setPlate] = useState('');
+  const [warn, setWarn] = useState(null);   // result of the check before joining: this request would be class X
   const { busy, error, setError, run } = useAction();
 
   const load = useLoad(async () => {
@@ -46,9 +49,25 @@ export default function ChargeFlow({ user, onClose }) {
   const post = (path, text) => run(async () => { await api(path, { method: 'POST', body: {} }); setMessage(text); await load(); });
 
   const batteryNumber = battery === '' ? NaN : Number(battery);
+  const requestBody = () => ({ hubId, vehicleId, batteryLevel: batteryNumber, startInMinutes: startIn, nextRequiredUsageAt: new Date(needed().at).toISOString() });
+  // Pressing confirm first checks at once whether the vehicle could be ready in time (class X means it cannot).
   async function join() {
-    const r = await run(() => api('/charging/requests', { method: 'POST', body: {
-      hubId, vehicleId, batteryLevel: batteryNumber, startInMinutes: startIn, nextRequiredUsageAt: new Date(needed().at).toISOString() } }));
+    const check = await run(() => api('/charging/preview', { method: 'POST', body: requestBody() }));
+    if (check?.willBeClassX) { setWarn(check); return; }
+    if (check) await register();
+  }
+  const laterTime = () => {
+    const at = new Date(Date.parse(warn.earliestUseAt));
+    setNeedH(pad2(at.getHours())); setNeedM(pad2(at.getMinutes()));
+    setWarn(null); setStep(3);
+  };
+  async function addVehicle() {
+    const r = await run(() => api('/vehicles/personal', { method: 'POST', body: { plate, vehicleType: 'Motorcycle', connectorType: 'Type2', hubId: data.hubs[0]?.id } }));
+    if (r) { setPlate(''); setAdding(false); setVehicleId(r.vehicle.id); setHubId(r.vehicle.hub_id || ''); setBattery(String(Math.round(r.vehicle.battery_level ?? 0))); await load(); setStep(2); }
+  }
+  async function register() {
+    setWarn(null);
+    const r = await run(() => api('/charging/requests', { method: 'POST', body: requestBody() }));
     if (r) { setMessage('You are in the charging queue. We will tell you when a charger is ready.'); setStep(1); setVehicleId(''); setHubId(''); setBattery(''); await load(); }
   }
 
@@ -77,13 +96,14 @@ export default function ChargeFlow({ user, onClose }) {
       {active.status === 'Queued' && <>
         {active.estimated_start_at && <div style={{ textAlign: 'center' }}><Countdown until={active.estimated_start_at} label="Estimated start in" overLabel="soon" warnSeconds={0}/></div>}
         <p>You can close the app. We will send you a message when it is your turn.</p>
+        <button className="stu-btn secondary" disabled={busy} onClick={() => run(async () => { await skipDemoSeconds(); await load(); })}>+45s demo clock <small>(demo only)</small></button>
       </>}
       {active.status === 'Assigned' && <>
         {active.connect_deadline && <div style={{ textAlign: 'center' }}><Countdown until={active.connect_deadline} label="Connect within" overLabel="expired"/></div>}
         <button className="stu-btn" disabled={busy} onClick={() => post(`/charging/requests/${active.id}/connect`, 'Connected. Charging has started.')}>I have connected my vehicle</button>
       </>}
       {active.status === 'Charging' && <>
-        <Battery level={active.vehicle_battery ?? active.battery_level} label={`Battery (goal ${limits?.targetBatteryPercent ?? 100}%)`}/>
+        <Battery level={active.vehicle_battery ?? active.battery_level} charging={active.status === 'Charging'} label={`Battery (goal ${limits?.targetBatteryPercent ?? 100}%)`}/>
         {active.eta_notice_at && (active.vehicle_battery ?? 0) < (active.notice_battery ?? 90) && <div className="stu-note">Expected to reach {active.notice_battery}% at about <b>{hhmm(active.eta_notice_at)}</b>. We will tell you then. Charging goes on to 100%.</div>}
         {(active.vehicle_battery ?? 0) >= (active.notice_battery ?? 90) && <div className="stu-note">Your vehicle is ready. Please come and collect it.</div>}
         <ElapsedBar since={active.charging_started_at} limitMinutes={limits?.maxSessionMinutes || undefined} label="Charging time"/>
@@ -93,16 +113,20 @@ export default function ChargeFlow({ user, onClose }) {
   </>;
 
   /* ---- New request ---- */
-  const back = () => (step === 1 ? onClose() : setStep(step - 1));
+  const back = () => { setWarn(null); if (adding) { setAdding(false); return; } return step === 1 ? onClose() : setStep(step - 1); };
   const n = needed();
   const batteryOk = Number.isInteger(batteryNumber) && batteryNumber >= 0 && batteryNumber <= 100;
   return <>
     <BackHeader title={['', 'Which vehicle?', 'Which Hub?', 'Battery and times', 'Check and confirm'][step]} onBack={back} step={step} steps={4}/>
     {message && <div className="stu-ok" onClick={() => setMessage('')}>{message}</div>}
     {error && <div className="stu-error" onClick={() => setError('')}>{error}</div>}
-    {step === 1 && (data.vehicles.length === 0
-      ? <div className="stu-card"><p>You have no vehicle yet. Open “Park my vehicle” and add your vehicle first.</p></div>
-      : <div className="choice-list">{data.vehicles.map(v => <Choice key={v.id} icon={'🛵'} title={v.plate} hint={`${v.vehicle_type}${v.hub_id ? ` · at ${data.hubs.find(h => h.id === v.hub_id)?.name || 'a Hub'}` : ''}`} chosen={vehicleId === v.id} onClick={() => { setVehicleId(v.id); setHubId(v.hub_id || ''); setBattery(String(Math.round(v.battery_level))); setStep(2); }}/>)}</div>)}
+    {step === 1 && !adding && <div className="choice-list">{data.vehicles.map(v => <Choice key={v.id} icon={'🛵'} title={v.plate} hint={`${v.vehicle_type}${v.hub_id ? ` · at ${data.hubs.find(h => h.id === v.hub_id)?.name || 'a Hub'}` : ''}`} chosen={vehicleId === v.id} onClick={() => { setVehicleId(v.id); setHubId(v.hub_id || ''); setBattery(String(Math.round(v.battery_level))); setStep(2); }}/>)}
+      <Choice icon="➕" title="Add a vehicle" hint="Register your motorcycle" onClick={() => setAdding(true)}/>
+    </div>}
+    {step === 1 && adding && <div className="stu-card">
+      <label>License plate<input value={plate} onChange={e => setPlate(e.target.value)} placeholder="51A-123.45"/></label>
+      <button className="stu-btn" disabled={busy || plate.trim().length < 4} onClick={addVehicle}>Save vehicle</button>
+    </div>}
     {step === 2 && <div className="choice-list">{data.hubs.map(h => <Choice key={h.id} icon="📍" title={h.name} hint={h.open_now ? `Open until ${h.close_time}` : `Closed · opens ${h.open_time}`} disabled={!h.open_now} chosen={hubId === h.id} onClick={() => { setHubId(h.id); setStep(3); }}/>)}</div>}
     {step === 3 && <>
       <div className="stu-card"><b>Battery level now (%)</b>
@@ -122,7 +146,16 @@ export default function ChargeFlow({ user, onClose }) {
         <div><small>Needed at</small><h2>{clockText(n.at)}{n.tomorrow ? ' (tomorrow)' : ''}</h2></div>
       </div>
       <div className="stu-note">Your vehicle must be at the Hub when it is time. After you join we show when it should reach 90%, so you know when to come back.</div>
-      <button className="stu-btn" disabled={busy} onClick={join}>Join the charging queue</button>
+      {warn ? <div className="stu-card" role="alert">
+        <b>Your vehicle may not be ready in time</b>
+        <p>At {batteryNumber}% it needs about {warn.chargeMinutesNeeded} minutes of charging, but you need it in {Math.max(0, warn.minutesToUse)} minutes. It would be put behind the other vehicles.</p>
+        {warn.earliestFitsToday
+          ? <p>A realistic time to need it: <b>{clockText(Date.parse(warn.earliestUseAt))}</b> or later.</p>
+          : <p>There is not enough time left today to charge it fully before the Hub closes.</p>}
+        {warn.earliestFitsToday && <button className="stu-btn" onClick={laterTime}>Choose a later time</button>}
+        <button className="stu-btn secondary" disabled={busy} onClick={register}>Join the queue anyway</button>
+        <button className="stu-btn secondary" onClick={() => { setWarn(null); onClose(); }}>Do not register</button>
+      </div> : <button className="stu-btn" disabled={busy} onClick={join}>Join the charging queue</button>}
     </>}
   </>;
 }

@@ -1,3 +1,4 @@
+import BatteryIcon from '../components/BatteryIcon.jsx';
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useAutoRefresh } from '../clock';
 
@@ -14,9 +15,8 @@ export function BackHeader({ title, onBack, step, steps }) {
   </>;
 }
 
-export function Battery({ level, label = 'Battery' }) {
-  const cls = level < 20 ? 'low' : level < 40 ? 'mid' : '';
-  return <div className="stu-battery"><div className="row"><span>{label}</span><span>{Math.round(level)}%</span></div><div className="bar"><i className={cls} style={{ width: `${Math.max(0, Math.min(100, level))}%` }}/></div></div>;
+export function Battery({ level, label = 'Battery', charging = false }) {
+  return <div className="stu-battery"><div className="row"><span>{label}</span><BatteryIcon level={level} charging={charging} size="lg"/></div></div>;
 }
 
 export const Choice = ({ icon, title, hint, right, chosen, disabled, onClick }) =>

@@ -8,8 +8,8 @@ import { config } from '../config.js';
  * Mock data for the demo (the simulated sensor feed). Hub Power Limits and charger power are EXAMPLE values read from
  * data/configuration.json (demoData), not a group-approved configuration. A 1 kW charger is about what a real electric
  * scooter charger delivers (3.5 kWh in roughly 3.5 hours).
- * The Central Hub is set so that the limit binds: two chargers of 1 kW but a 1 kW limit, so only one can run at a time.
- * This is what shows the Hub Power Limit rule in the demo (a second personal charging request from the Demo Student waits in the queue).
+ * All three Hubs are identical: five chargers of 1 kW and a 5 kW Hub Power Limit, so all five chargers run together in normal
+ * operation. The limit only matters in a what-if run (for example a power outage with a smaller backup supply).
  */
 const CHARGER_POWER_KW = config.demoData.seedChargerPowerKw;
 const HUB_LIMIT_KW = config.demoData.seedHubPowerLimitsKw;
@@ -34,9 +34,9 @@ export function seedDatabase() {
       (id, code, name, location, open_time, close_time, power_limit_kw, status, sensor_updated_at)
       VALUES (?, ?, ?, ?, '05:00', '23:00', ?, 'Open', ?)`);
     const hubs = [
-      ['hub-central', 'HUB-01', 'Central Campus Hub', 'Main Campus', HUB_LIMIT_KW['hub-central']],
-      ['hub-engineering', 'HUB-02', 'Engineering Hub', 'Engineering Zone', HUB_LIMIT_KW['hub-engineering']],
-      ['hub-library', 'HUB-03', 'Library Hub', 'Library Area', HUB_LIMIT_KW['hub-library']]
+      ['hub-central', 'HUB-01', 'Hub A', 'Main Campus', HUB_LIMIT_KW['hub-central']],
+      ['hub-engineering', 'HUB-02', 'Hub B', 'Engineering Zone', HUB_LIMIT_KW['hub-engineering']],
+      ['hub-library', 'HUB-03', 'Hub C', 'Library Area', HUB_LIMIT_KW['hub-library']]
     ];
     hubs.forEach(hub => addHub.run(...hub, now));
 
@@ -73,13 +73,31 @@ export function seedDatabase() {
       }
     }
 
-    // Sensor data: six of ten Personal slots at the Engineering Hub are taken by vehicles that are not registered in the
+    // Sensor data: six of ten Personal slots at Hub B are taken by vehicles that are not registered in the
     // system (60% occupancy). A small arrival surge in a what-if run then reaches the warning level.
     for (let i = 1; i <= 6; i++) occupySlot.run(null, now, 'hub-engineering-P' + i);
 
-    // Demo Student's personal vehicles, available at the Central Campus Hub.
-    addVehicle.run('personal-demo-1', '51A-123.45', 'Motorcycle', 'Type2', 'personal', 'hub-central', 'student-demo', 54, 'Available', null, now);
-    addVehicle.run('personal-demo-2', '59A-678.90', 'Motorcycle', 'GB/T', 'personal', 'hub-central', 'student-demo', 68, 'Available', null, now);
+    // Five example Students (student1 ... student5), each with a registered motorcycle that is parked at Hub A right now.
+    // The parking times differ: they arrived 10 minutes to 4 hours ago and booked 2 to 5 hours. Any other Student has no
+    // vehicle and adds one with "Add a vehicle".
+    const addReservation = db.prepare(`INSERT INTO parking_reservations
+      (id, user_id, vehicle_id, hub_id, slot_id, status, start_at, end_at, expires_at, arrived_at, created_at)
+      VALUES (?, ?, ?, 'hub-central', ?, 'In Progress', ?, ?, ?, ?, ?)`);
+    const atMinutes = minutes => new Date(Date.parse(now) + minutes * 60000).toISOString();
+    [
+      // [plate, battery %, minutes since arrival, booked hours]
+      ['51A-123.45', 72, 10, 2], ['52B-123.45', 58, 40, 2], ['53C-123.45', 85, 90, 3], ['54D-123.45', 35, 150, 4], ['55E-123.45', 64, 240, 5]
+    ].forEach(([plate, battery, since, hours], index) => {
+      const n = index + 1, vehicleId = `personal-student${n}`, slotId = `hub-central-P${n}`;
+      addUser.run(`student${n}`, `student${n}`, 'Student', now);
+      // An account with this name may already exist (an Admin can create it), so use the id it really has.
+      const userId = db.prepare(`SELECT id FROM users WHERE full_name=? AND role='Student'`).get(`student${n}`).id;
+      addVehicle.run(vehicleId, plate, 'Motorcycle', 'Type2', 'personal', 'hub-central', userId, battery, 'Parked', null, now);
+      occupySlot.run(vehicleId, now, slotId);
+      const start = atMinutes(-since);
+      addReservation.run(`parking-seed-${n}`, userId, vehicleId, slotId, start, atMinutes(-since + hours * 60),
+        atMinutes(-since + config.parking.arrivalGraceMinutes), start, start);
+    });
 
     // The low-battery shared vehicle joins the charging queue automatically (BR-25). Its Next Required Usage Time is
     // unknown, as for any shared vehicle the Operator has not scheduled (OD-2).
@@ -89,7 +107,7 @@ export function seedDatabase() {
       VALUES ('charge-seed-shared', NULL, ?, 'hub-engineering', 'shared_automatic', 'Queued', 16, NULL, ?, ?, ?)`)
       .run(`hub-engineering-V${SEED_SHARED_VEHICLES}`, now, now, now);
   });
-  return { seeded: true, hubs: 3, users: 4 };
+  return { seeded: true, hubs: 3, users: 9 };
 }
 
 // Runs the seed when this file is started directly (node seed.js); the comparison also works on Windows paths.

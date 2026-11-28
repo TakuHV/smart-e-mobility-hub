@@ -5,6 +5,7 @@ import { seedDatabase } from './database/seed.js';
 import { attachUser } from './middleware/requestContext.js';
 import { HttpError } from './services/commonService.js';
 import { runCycle } from './services/timerService.js';
+import { runMoveRequestTimers } from './services/chargingService.js';
 import { clockStatus } from './clock.js';
 import { config } from './config.js';
 import authRoutes from './routes/authRoutes.js';
@@ -93,6 +94,7 @@ if (!isTest) {
   maintenanceTimer = setInterval(() => {
     const { speed, paused } = clockStatus();
     if (paused) return;
+    try { runMoveRequestTimers(); } catch (error) { console.error('Move timer failed:', error); }
     const dueMs = Math.max(TICK_MS, (config.status.refreshIntervalSeconds * 1000) / speed);
     if (Date.now() - lastRunReal >= dueMs) { lastRunReal = Date.now(); runDue(); }
   }, TICK_MS);
