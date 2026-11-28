@@ -4,7 +4,7 @@
   "containerEnv": {
     "VITE_API_URL": "/api"
   },
-  "postCreateCommand": "npm install",
+  "postCreateCommand": "npm install && touch server/.env",
   "postAttachCommand": "npm run dev",
   "forwardPorts": [5173, 4000],
   "portsAttributes": {
