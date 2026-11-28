@@ -538,7 +538,9 @@ test('Demo reset: data returns to the sample state and accounts return to the fi
 
   // the system works again after the reset
   const student = demoLogin({ displayName: 'Student' });
-  const vehicle = db.prepare(`SELECT id FROM vehicles WHERE kind='shared' AND status='Available' AND battery_level>=20 LIMIT 1`).get();
+  const vehicle = db.prepare(`SELECT id, hub_id FROM vehicles WHERE kind='shared' AND status='Available' AND battery_level>=30 LIMIT 1`).get();
+  // open the Hub all day, so the test does not depend on the time it runs (BR-42 is tested elsewhere)
+  db.prepare(`UPDATE hubs SET open_time='00:00', close_time='23:59' WHERE id=?`).run(vehicle.hub_id);
   assert.equal(createBooking({ user: student, vehicleId: vehicle.id }).status, 'Confirmed');
 });
 

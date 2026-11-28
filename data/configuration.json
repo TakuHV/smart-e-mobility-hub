@@ -1,5 +1,5 @@
 {
-  "valueStatus": "Blocks booking, parking, thresholds and status.staleAfterMinutes, and the two charging limits personalRequestsPerVehiclePerDay and personalConnectWindowMinutes, follow Submission #1. charging.scheduler and charging.targetBatteryPercent are PROPOSED VALUES from the Technical Design Document (sections 2.2 and 2.3) that the group has not approved. demoData is mock data for the classroom demonstration. Every value below is read by the server (server/src/config.js); an invalid value stops the server at start with a message.",
+  "valueStatus": "All values except demoData follow Submission #1 v8 (Section 6.2, Operating parameters), where the group approved them, including charging.scheduler and charging.targetBatteryPercent. demoData is mock data for the classroom demonstration. Every value below is read by the server (server/src/config.js); an invalid value stops the server at start with a message.",
 
   "operatingHours": { "open": "05:00", "close": "23:00" },
 
@@ -36,7 +36,7 @@
       "urgencyHorizonMinutes": 240,
       "waitingDivisorMinutes": 3,
       "estimatedSessionMinutes": 120,
-      "note": "Proposed Values (Technical Design Document 2.2). The estimated session length only feeds the queue-time estimate, which is not a guarantee (BR-43). No replacement threshold or maximum session duration is applied. The Hub Power Limit is a capacity limit, not a weight."
+      "note": "Approved values (Submission #1 v8: BR-21, BR-22, BR-43 and Section 6.2). The estimated session length only feeds the queue-time estimate, which is not a guarantee (BR-43). A shared vehicle is displaced only when the waiting request is clearly ahead (class H against class L, or a score higher by preemptMarginPoints); a booked vehicle or one at preemptMaxBatteryPercent or more is never displaced. No maximum session duration is applied. The Hub Power Limit is a capacity limit, not a weight."
     }
   },
 

@@ -31,7 +31,7 @@ test('UC-005/006/007: booking, pickup, low-battery return and automatic queueing
   const hubId=makeId('test-booking-hub');
   const now=nowIso();
   db.prepare(`INSERT INTO hubs (id,code,name,location,open_time,close_time,power_limit_kw,status,sensor_updated_at)
-    VALUES (?,?,? ,?,'05:00','23:00',30,'Open',?)`)
+    VALUES (?,?,? ,?,'00:00','23:59',30,'Open',?)`)   // open all day, so the test does not depend on the time it runs
     .run(hubId, `TB-${hubId.slice(-8)}`, 'Test Booking Hub', 'Automated Test', now);
   const slotId=makeId('test-booking-slot');
   db.prepare(`INSERT INTO parking_slots
@@ -55,7 +55,9 @@ test('UC-008: personal parking reservation occupies and releases a Personal slot
   const student=addUser('Student');
   const vehicle=addVehicle({kind:'personal',hubId:'hub-library',ownerId:student.id,battery:54});
   const slot=db.prepare(`SELECT * FROM parking_slots WHERE hub_id='hub-library' AND slot_type='Personal' AND status='Available' LIMIT 1`).get();
-  const start=new Date(Date.now()+60*60000), end=new Date(Date.now()+180*60000);
+  // Tomorrow 10:00-12:00 Vietnam time (03:00-05:00 UTC): always in the future, inside Hub hours and on one day, whatever the time of the run.
+  const day=new Date(); day.setUTCDate(day.getUTCDate()+1); day.setUTCHours(3,0,0,0);
+  const start=day, end=new Date(day.getTime()+120*60000);
   const reservation=createReservation({user:student,vehicleId:vehicle.id,hubId:'hub-library',slotId:slot.id,startAt:start.toISOString(),endAt:end.toISOString()});
   assert.equal(reservation.status,'Confirmed');
   assert.equal(db.prepare('SELECT status FROM parking_slots WHERE id=?').get(slot.id).status,'Reserved');
