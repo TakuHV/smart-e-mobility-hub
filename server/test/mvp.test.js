@@ -21,7 +21,7 @@ const addVehicle = ({ kind, hubId, ownerId = null, battery = 64, connector = 'Ty
   db.prepare(`INSERT INTO vehicles
     (id,plate,vehicle_type,connector_type,kind,hub_id,owner_id,battery_level,status,updated_at)
     VALUES (?,?,?,?,?,?,?,?,?,?)`)
-    .run(id,`TEST-${id.slice(-8)}`,'Car',connector,kind,hubId,ownerId,battery,
+    .run(id,`TEST-${id.slice(-8)}`,'Motorcycle',connector,kind,hubId,ownerId,battery,
       battery < 20 ? 'Needs Charging' : 'Available',nowIso());
   return db.prepare('SELECT * FROM vehicles WHERE id=?').get(id);
 };
@@ -37,7 +37,7 @@ test('UC-005/006/007: booking, pickup, low-battery return and automatic queueing
   db.prepare(`INSERT INTO parking_slots
     (id,hub_id,code,slot_type,supported_vehicle_types_json,status,updated_at)
     VALUES (?,?,?,'Shared',?,'Available',?)`)
-    .run(slotId, hubId, 'TEST-S-01', JSON.stringify(['Car']), now);
+    .run(slotId, hubId, 'TEST-S-01', JSON.stringify(['Motorcycle']), now);
   const vehicle=addVehicle({kind:'shared',hubId,battery:64});
   const booking=createBooking({user:student,vehicleId:vehicle.id});
   assert.equal(booking.status,'Confirmed');
@@ -68,6 +68,9 @@ test('UC-009/021 and BR-46: personal charging, removal request and charger relea
   const operator=addUser('Operator');
   // The test must not depend on the time of day: the Hub is open all day and the next use is soon.
   db.prepare("UPDATE hubs SET open_time='00:00', close_time='23:59' WHERE id='hub-engineering'").run();
+  // The seeded shared fleet (15 vehicles) would otherwise fill every charger; this test is about the personal flow.
+  db.prepare("UPDATE vehicles SET battery_level=100, status='Available' WHERE kind='shared' AND hub_id='hub-engineering'").run();
+  db.prepare("DELETE FROM charging_requests WHERE hub_id='hub-engineering'").run();
   const vehicle=addVehicle({kind:'personal',hubId:'hub-engineering',ownerId:student.id,battery:32});
   const request=createPersonalChargingRequest({user:student,vehicleId:vehicle.id,hubId:'hub-engineering',batteryLevel:32,
     nextRequiredUsageAt:new Date(Date.now()+20*60000).toISOString()});
@@ -115,12 +118,12 @@ test('Shared vehicle Move Vehicle Request cycle: TO_CHARGER and FROM_CHARGER kee
   db.prepare(`INSERT INTO vehicles
     (id,plate,vehicle_type,connector_type,kind,hub_id,owner_id,battery_level,status,updated_at)
     VALUES (?,?,?,?, 'shared', ?, NULL, 16, 'Needs Charging', ?)`)
-    .run(vehicleId, `MVR-${vehicleId.slice(-8)}`, 'Car', 'Type2', hubId, now);
+    .run(vehicleId, `MVR-${vehicleId.slice(-8)}`, 'Motorcycle', 'Type2', hubId, now);
   const slotId = makeId('test-shared-slot');
   db.prepare(`INSERT INTO parking_slots
     (id,hub_id,code,slot_type,supported_vehicle_types_json,status,current_vehicle_id,updated_at)
     VALUES (?,?,?,'Shared',?,'Occupied',?,?)`)
-    .run(slotId, hubId, 'TEST-S-01', JSON.stringify(['Car']), vehicleId, now);
+    .run(slotId, hubId, 'TEST-S-01', JSON.stringify(['Motorcycle']), vehicleId, now);
   const chargerId = makeId('test-charger');
   db.prepare(`INSERT INTO chargers (id,hub_id,code,connector_types_json,power_kw,status,updated_at)
     VALUES (?,?,?,? ,7.2,'Available',?)`)

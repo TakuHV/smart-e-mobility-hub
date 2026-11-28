@@ -112,14 +112,14 @@ export default function BookFlow({ onClose }) {
         : vehiclesAt(fromHub).map(v => <Choice key={v.id} icon={'🛵'} title={v.plate} hint={v.vehicle_type} right={`${v.battery_level}%`} chosen={vehicleId === v.id} onClick={() => { setVehicleId(v.id); setStep(3); }}/>)}
     </div>}
     {step === 3 && <div className="choice-list">
-      {data.hubs.map(h => { const same = h.id === fromHub; const free = freeSlotsAt(h.id) > 0; return <Choice key={h.id} icon="🏁" title={h.name} hint={same ? 'You pick up here. Choose another Hub.' : !h.open_now ? 'Closed now' : free ? hubHint(h) : 'No free spot right now'} disabled={same || !h.open_now || !free} chosen={toHub === h.id} onClick={() => { setToHub(h.id); setStep(4); }}/>; })}
+      {data.hubs.map(h => { const same = h.id === fromHub; const free = same || freeSlotsAt(h.id) > 0; return <Choice key={h.id} icon="🏁" title={h.name} hint={!h.open_now ? 'Closed now' : same ? 'Round trip: bring it back here' : free ? hubHint(h) : 'No free spot right now'} disabled={!h.open_now || !free} chosen={toHub === h.id} onClick={() => { setToHub(h.id); setStep(4); }}/>; })}
     </div>}
     {step === 4 && chosen && <>
       <div className="stu-card">
         <div><small>From</small><h2>{hubName(fromHub)}</h2></div>
         <div><small>Vehicle</small><h2>{chosen.plate}</h2></div>
         <Battery level={chosen.battery_level}/>
-        <div><small>To</small><h2>{hubName(toHub)}</h2></div>
+        <div><small>To</small><h2>{hubName(toHub)}{toHub === fromHub ? ' (round trip)' : ''}</h2></div>
       </div>
       <div className="stu-card"><b>When will you pick it up?</b><Chips value={pickupIn} onChange={setPickupIn} options={PICKUP}/></div>
       <div className="stu-note">After booking you have {limits?.pickupHoldMinutes ?? 15} minutes to pick up the vehicle.</div>

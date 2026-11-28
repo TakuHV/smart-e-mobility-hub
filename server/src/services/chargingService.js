@@ -712,7 +712,7 @@ export function runMaintenance() {
       addViolation(b.user_id, 1, `Shared vehicle was not collected within the ${config.booking.pickupHoldMinutes}-minute pickup hold.`, 'booking', b.id);
       auditChange('Booking', b.id, 'BOOKING_EXPIRED', {}, 'system');
       notify({ userId: b.user_id, kind: 'booking_expired', entityType: 'Booking', entityId: b.id, severity: 'warning',
-        title: 'Booking expired', message: 'The vehicle was not picked up in time. It was released and one violation point was recorded.' });
+        title: 'Booking expired', message: 'The vehicle was not picked up in time. It was released.' });
       expiredBookings++;
     }
     const parks = db.prepare(`SELECT * FROM parking_reservations WHERE status='Confirmed' AND expires_at<=?`).all(now);
@@ -722,7 +722,7 @@ export function runMaintenance() {
       addViolation(p.user_id, 1, `Personal parking reservation was not used within the ${config.parking.arrivalGraceMinutes}-minute arrival grace period.`, 'parking', p.id);
       auditChange('ParkingReservation', p.id, 'PARKING_RESERVATION_EXPIRED', {}, 'system');
       notify({ userId: p.user_id, kind: 'parking_expired', entityType: 'ParkingReservation', entityId: p.id, severity: 'warning',
-        title: 'Parking reservation expired', message: 'You did not arrive in time. The slot was released and one violation point was recorded.' });
+        title: 'Parking reservation expired', message: 'You did not arrive in time. The slot was released.' });
       expiredParking++;
     }
     const assigned = db.prepare(`SELECT r.*, v.owner_id FROM charging_requests r JOIN vehicles v ON v.id=r.vehicle_id
@@ -734,7 +734,7 @@ export function runMaintenance() {
       addViolation(r.owner_id, 1, `Personal vehicle was not connected within ${config.charging.personalConnectWindowMinutes} minutes after charger assignment.`, 'charging', r.id);
       auditChange('ChargingRequest', r.id, 'PERSONAL_CHARGING_ASSIGNMENT_EXPIRED', {}, 'system');
       notify({ userId: r.owner_id, kind: 'charging_expired', entityType: 'ChargingRequest', entityId: r.id, severity: 'warning',
-        title: 'Charger assignment expired', message: 'The vehicle was not connected in time. The charger was released and one violation point was recorded.' });
+        title: 'Charger assignment expired', message: 'The vehicle was not connected in time. The charger was released.' });
       expiredCharging++;
     }
   });
@@ -778,6 +778,18 @@ function runMoveTimers(nowMs) {
   }
 }
 
+// "Ready to collect" message for a personal vehicle that reached the pickup level (90%). Sent once (notifications ignore a repeat).
+function sendPickupNotice(session, battery) {
+  const level = config.charging.pickupNoticePercent;
+  if (session.kind !== 'personal' || !session.owner_id || battery < level) return;
+  const full = battery >= config.charging.targetBatteryPercent;
+  notify({ userId: session.owner_id, kind: 'charging_pickup_notice', entityType: 'ChargingRequest', entityId: session.id, severity: 'info',
+    title: `${session.plate} reached ${level}%`,
+    message: full
+      ? `Your vehicle is ready. Please collect it within ${config.charging.pickupGraceMinutes} minutes.`
+      : `You can collect it now. Charging goes on to ${config.charging.targetBatteryPercent}%; collect it within ${config.charging.pickupGraceMinutes} minutes after that.` });
+}
+
 export function runChargingTimers(nowMs = clockNow()) {
   const target = config.charging.targetBatteryPercent;
   const capMs = config.charging.maxSessionMinutes ? config.charging.maxSessionMinutes * MIN : null;
@@ -790,18 +802,16 @@ export function runChargingTimers(nowMs = clockNow()) {
   for (const session of sessions) {
     const elapsed = nowMs - Date.parse(session.charging_started_at);
     const battery = Math.min(100, Math.round(chargedBattery(session.start_battery ?? session.battery_level, session.power_kw, session.vehicle_type, elapsed)));
-    if (battery >= target) { finishCharging({ request: session, battery: target, actorId: 'system', reason: 'target reached' }); continue; }
-    if (capMs !== null && elapsed >= capMs) { finishCharging({ request: session, battery, actorId: 'system', reason: 'maximum session length' }); continue; }
+    // A big clock jump can take a vehicle past 90% and to the end in one step: the owner must still get the 90% message first.
+    if (battery >= target) { sendPickupNotice(session, battery); finishCharging({ request: session, battery: target, actorId: 'system', reason: 'target reached' }); continue; }
+    if (capMs !== null && elapsed >= capMs) { sendPickupNotice(session, battery); finishCharging({ request: session, battery, actorId: 'system', reason: 'maximum session length' }); continue; }
     if (battery !== session.vehicle_battery) {
       db.prepare('UPDATE vehicles SET battery_level=?, updated_at=? WHERE id=?').run(battery, nowText, session.vehicle_id);
       // A shared vehicle becomes bookable again when it reaches the minimum battery.
       if (session.kind === 'shared') db.prepare('UPDATE vehicles SET status=? WHERE id=?').run(sharedStatus(session.vehicle_id, battery), session.vehicle_id);
     }
     // The owner is told when the vehicle is ready to be collected; charging continues up to the target.
-    if (session.kind === 'personal' && session.owner_id && battery >= config.charging.pickupNoticePercent && battery < target) {
-      notify({ userId: session.owner_id, kind: 'charging_pickup_notice', entityType: 'ChargingRequest', entityId: session.id, severity: 'info',
-        title: `${session.plate} reached ${config.charging.pickupNoticePercent}%`, message: `You can collect it now. Charging goes on to ${target}%; collect it within ${config.charging.pickupGraceMinutes} minutes after that.` });
-    }
+    sendPickupNotice(session, battery);
   }
   settleBookedChargingVehicles(nowMs);
   runMoveTimers(nowMs);
@@ -829,7 +839,7 @@ export function runChargingTimers(nowMs = clockNow()) {
     if (m.kind === 'personal' && m.owner_id) {
       // A warning only: this product does not record violation points.
       notify({ userId: m.owner_id, kind: 'charging_removal_overdue', entityType: 'ChargingRequest', entityId: m.request_id, severity: 'critical', title: 'Collect your vehicle',
-        message: `${text} A violation point would be recorded in the full system. Your vehicle is being moved to the Holding area.` });
+        message: `${text} Your vehicle is being moved to the Holding area.` });
       const holding = db.prepare(`SELECT COUNT(*) AS n FROM parking_slots WHERE hub_id=? AND slot_type='Holding' AND status='Available'`).get(m.charger_hub).n;
       if (holding > 0) {
         db.prepare(`UPDATE move_vehicle_requests SET destination='Holding', status='Requested', assigned_to=NULL, started_at=NULL, sent_at=NULL, auto_send_at=?,

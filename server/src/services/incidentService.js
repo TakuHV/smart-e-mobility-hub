@@ -53,7 +53,7 @@ function takeVehicleOutOfService(vehicle, now, actorId) {
       auditChange('Booking', booking.id, 'BOOKING_CANCELLED_BY_INCIDENT', {}, actorId);
       notify({ userId: booking.user_id, kind: 'booking_cancelled_incident', entityType: 'Booking', entityId: booking.id, severity: 'warning',
         title: 'Booking cancelled', message: `${vehicle.plate} has a fault, so your booking was cancelled without a violation. Please choose another vehicle.` });
-      effects.push('The booking of this vehicle was cancelled (no violation point).');
+      effects.push('The booking of this vehicle was cancelled.');
     }
   }
   // A faulty vehicle cannot be charged or booked.

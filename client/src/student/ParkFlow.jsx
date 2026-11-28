@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import { api, query } from '../api';
 import { virtualNow, useNow } from '../clock';
 import { Countdown } from '../components/Timers';
+import { useClockState } from '../clock';
 import { BackHeader, Choice, Chips, TimeFields, toInt, useLoad, useAction, hubHint } from './ui';
 
 const pad2 = n => String(n).padStart(2, '0');
@@ -10,6 +11,8 @@ const fmt = v => new Date(v).toLocaleTimeString('en-GB', { hour: '2-digit', minu
 
 export default function ParkFlow({ onClose }) {
   const now = useNow();
+  const { limits } = useClockState();
+  const maxStayHours = limits?.maxStayHours ?? 8;
   const [data, setData] = useState(null);
   const [adding, setAdding] = useState(false);
   const [wizard, setWizard] = useState(false);
@@ -23,8 +26,6 @@ export default function ParkFlow({ onClose }) {
   const [slot, setSlot] = useState(null);
   const [fixed, setFixed] = useState(null); // the chosen period, fixed when the student moves to the last step
   const [plate, setPlate] = useState('');
-  const [vType, setVType] = useState('Motorcycle');
-  const [connector, setConnector] = useState('Type2');
   const [message, setMessage] = useState('');
   const { busy, error, setError, run } = useAction();
 
@@ -42,9 +43,18 @@ export default function ParkFlow({ onClose }) {
     if ([lh, lm].some(Number.isNaN)) return { error: 'Please type the hours and the minutes.' };
     const stay = lh * 60 + lm;
     if (stay < 15) return { error: 'Please stay at least 15 minutes.' };
-    if (stay > 24 * 60) return { error: 'The stay is too long. Please type at most 24 hours.' };
+    if (stay > maxStayHours * 60) return { error: `You can park for at most ${maxStayHours} hours at a time.` };
     const start = virtualNow() + Math.max(arrChoice, 2) * 60000;
-    return { startAt: new Date(start).toISOString(), endAt: new Date(start + stay * 60000).toISOString() };
+    const end = start + stay * 60000;
+    // The stay must end before the Hub closes (the same day).
+    const closing = data?.hubs.find(h => h.id === hubId)?.close_time;
+    if (closing) {
+      const [ch, cm] = closing.split(':').map(Number);
+      const endDate = new Date(end);
+      const limit = new Date(start); limit.setHours(ch, cm, 0, 0);
+      if (endDate.toDateString() !== new Date(start).toDateString() || endDate > limit) return { error: `This Hub closes at ${closing}. Please choose a shorter stay.` };
+    }
+    return { startAt: new Date(start).toISOString(), endAt: new Date(end).toISOString() };
   };
   const period = () => { const t = typed(); return { startAt: t.startAt, endAt: t.endAt }; };
 
@@ -66,7 +76,7 @@ export default function ParkFlow({ onClose }) {
   const act = (id, name, text) => run(async () => { await api(`/parking/reservations/${id}/${name}`, { method: 'POST', body: {} }); setMessage(text); await load(); });
 
   async function addVehicle() {
-    const r = await run(() => api('/vehicles/personal', { method: 'POST', body: { plate, vehicleType: vType, connectorType: connector, hubId: data.hubs[0]?.id } }));
+    const r = await run(() => api('/vehicles/personal', { method: 'POST', body: { plate, vehicleType: 'Motorcycle', connectorType: 'Type2', hubId: data.hubs[0]?.id } }));
     if (r) { setPlate(''); setAdding(false); setVehicleId(r.vehicle.id); setHubId(r.vehicle.hub_id || ''); await load(); setStep(2); }
   }
   async function reserve() {
@@ -82,12 +92,10 @@ export default function ParkFlow({ onClose }) {
       {error && <div className="stu-error" onClick={() => setError('')}>{error}</div>}
       {step === 1 && !adding && <div className="choice-list">
         {data.vehicles.map(v => <Choice key={v.id} icon={'🛵'} title={v.plate} hint={v.vehicle_type} chosen={vehicleId === v.id} onClick={() => { setVehicleId(v.id); setHubId(v.hub_id || ''); setStep(2); }}/>)}
-        <Choice icon="➕" title="Add a vehicle" hint="Register your own EV" onClick={() => setAdding(true)}/>
+        <Choice icon="➕" title="Add a vehicle" hint="Register your motorcycle" onClick={() => setAdding(true)}/>
       </div>}
       {step === 1 && adding && <div className="stu-card">
         <label>License plate<input value={plate} onChange={e => setPlate(e.target.value)} placeholder="51A-123.45"/></label>
-        <div><b>Type</b><Chips value={vType} onChange={setVType} options={[{ value: 'Motorcycle', label: '🛵 Motorcycle' }, { value: 'Car', label: 'Car' }]}/></div>
-        <div><b>Connector</b><Chips value={connector} onChange={setConnector} options={[{ value: 'Type2', label: 'Type 2' }, { value: 'GB/T', label: 'GB/T' }]}/></div>
         <button className="stu-btn" disabled={busy || plate.trim().length < 4} onClick={addVehicle}>Save vehicle</button>
       </div>}
       {step === 2 && <div className="choice-list">
@@ -96,7 +104,7 @@ export default function ParkFlow({ onClose }) {
       {step === 3 && (() => { const t = typed(); return <>
         <div className="stu-card"><b>What time do you arrive?</b>
           <Chips value={arrChoice} options={ARRIVE} onChange={setArrChoice}/></div>
-        <div className="stu-card"><b>How long will you stay?</b><TimeFields hour={lenH} minute={lenM} onHour={setLenH} onMinute={setLenM} maxHour={24} hourLabel="hours" minuteLabel="minutes"/></div>
+        <div className="stu-card"><b>How long will you stay?</b> <small>(at most {maxStayHours} hours, and before the Hub closes)</small><TimeFields hour={lenH} minute={lenM} onHour={setLenH} onMinute={setLenM} maxHour={maxStayHours} hourLabel="hours" minuteLabel="minutes"/></div>
         {t.error && <div className="stu-error">{t.error}</div>}
         <button className="stu-btn" disabled={!!t.error} onClick={() => { setFixed(period()); setStep(4); }}>Next</button>
       </>; })()}

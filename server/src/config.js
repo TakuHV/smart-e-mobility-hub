@@ -15,7 +15,7 @@ export const configPath = process.env.SMART_EMOBILITY_CONFIG
 const defaults = {
   operatingHours: { open: '05:00', close: '23:00' },
   booking: { pickupHoldMinutes: 15, minimumBatteryToBookPercent: 30, maxTripHours: 3 },
-  parking: { arrivalGraceMinutes: 15, overstayGraceMinutes: 15, sharedReturnReservePercent: 10, holdingFreeReservePercent: 40 },
+  parking: { maxStayHours: 8, arrivalGraceMinutes: 15, overstayGraceMinutes: 15, sharedReturnReservePercent: 10, holdingFreeReservePercent: 40 },
   thresholds: { parkingWarningPercent: 80, parkingCriticalPercent: 95, chargerUtilizationWarningPercent: 80, sharedVehicleShortagePercent: 20 },
   charging: {
     targetBatteryPercent: 100,
@@ -36,22 +36,22 @@ const defaults = {
       preemptMaxBatteryPercent: 90,     // a shared vehicle at or above this level is never displaced
       urgencyHorizonMinutes: 240,
       waitingDivisorMinutes: 3,
-      estimatedSessionMinutes: 45
+      estimatedSessionMinutes: 120
     }
   },
   status: { staleAfterMinutes: 2, refreshIntervalSeconds: 60 },
   reminders: { tripReminderMinutes: 150, parkingReminderBeforeEndMinutes: 10, lowBatteryWarningPercent: 15 },
   battery: {
-    capacityKwhByVehicleType: { Motorcycle: 3.5, Car: 24 },
+    capacityKwhByVehicleType: { Motorcycle: 3.5 },
     defaultCapacityKwh: 10,
-    tripConsumptionKwByVehicleType: { Motorcycle: 1.2, Car: 6 },
+    tripConsumptionKwByVehicleType: { Motorcycle: 1.2 },
     defaultTripConsumptionKw: 3,
     tripDropPercent: 20,              // average battery used by a trip between two Hubs
     tripDropMinutes: 20               // the drop is spread over this time
   },
   demoData: {
-    seedHubPowerLimitsKw: { 'hub-central': 7.2, 'hub-engineering': 14.4, 'hub-library': 14.4 },
-    seedChargerPowerKw: 7.2
+    seedHubPowerLimitsKw: { 'hub-central': 3, 'hub-engineering': 3, 'hub-library': 3 },
+    seedChargerPowerKw: 1
   }
 };
 
@@ -82,6 +82,7 @@ function validate(c) {
   number('battery.tripDropPercent', c.battery.tripDropPercent, { min: 0, max: 100 });
   number('battery.tripDropMinutes', c.battery.tripDropMinutes, { min: 0, minExclusive: true, max: 600 });
   number('booking.maxTripHours', c.booking.maxTripHours, { min: 0, minExclusive: true, max: 72 });
+  number('parking.maxStayHours', c.parking.maxStayHours, { min: 1, max: 24 });
   number('parking.arrivalGraceMinutes', c.parking.arrivalGraceMinutes, { min: 0, max: 240 });
   number('parking.overstayGraceMinutes', c.parking.overstayGraceMinutes, { min: 0, max: 240 });
   number('parking.sharedReturnReservePercent', c.parking.sharedReturnReservePercent, { min: 0, max: 100 });

@@ -8,7 +8,7 @@ import { enqueueSharedVehicle, handleChargerFailure, restoreCharger, runSchedule
  * Everything is validated here, runs in a transaction and is written to the audit log.
  * Rows that already have history cannot be deleted (foreign keys), so they are taken out of service or retired instead.
  */
-const VEHICLE_TYPES = ['Car', 'Motorcycle'];
+const VEHICLE_TYPES = ['Motorcycle']; // this Hub network serves motorcycles only
 const CONNECTORS = ['Type2', 'GB/T'];
 const SLOT_TYPES = ['Shared', 'Personal', 'Holding'];
 const SLOT_PREFIX = { Shared: 'S', Personal: 'P', Holding: 'H' };

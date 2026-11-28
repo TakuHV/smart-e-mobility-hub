@@ -19,11 +19,11 @@ export function listVehicles({ kind, hubId, user }) {
   return db.prepare(sql).all(...params);
 }
 
-export function createPersonalVehicle({ user, plate, vehicleType, connectorType, hubId }) {
+export function createPersonalVehicle({ user, plate, vehicleType = 'Motorcycle', connectorType = 'Type2', hubId }) {
   requireValue(user?.role === 'Student', 403, 'Only students can add a personal vehicle.');
   const cleanPlate = String(plate || '').trim().replace(/\s+/g, ' ').toUpperCase();
   requireValue(cleanPlate.length >= 4, 400, 'Enter a valid license plate.');
-  requireValue(['Car', 'Motorcycle'].includes(vehicleType), 400, 'Vehicle type must be Car or Motorcycle.');
+  requireValue(vehicleType === 'Motorcycle', 400, 'Only motorcycles are supported.');
   requireValue(['Type2', 'GB/T'].includes(connectorType), 400, 'Choose a supported connector type.');
   requireValue(db.prepare('SELECT id FROM hubs WHERE id=?').get(hubId), 404, 'Hub not found.');
   const id = makeId('vehicle');
@@ -86,10 +86,11 @@ export function createBooking({ user, vehicleId, destinationHubId = null, pickup
     if (destinationHubId) {
       const destination = db.prepare('SELECT * FROM hubs WHERE id=?').get(destinationHubId);
       requireValue(destination, 404, 'Destination Hub not found.');
-      requireValue(destinationHubId !== vehicle.hub_id, 400, 'Choose a different Hub from the one where you pick up the vehicle.');
       requireValue(destination.status === 'Open', 409, 'The destination Hub is closed. Choose another Hub.');
       const freeSlots = db.prepare(`SELECT COUNT(*) AS n FROM parking_slots WHERE hub_id=? AND slot_type='Shared' AND status='Available'`).get(destinationHubId).n;
-      requireValue(freeSlots > 0, 409, `${destination.name} has no free Shared slot right now. Choose another Hub.`);
+      // A round trip (same Hub) is allowed: the slot the vehicle leaves at pickup is free again when it comes back.
+      const roundTrip = destinationHubId === vehicle.hub_id ? 1 : 0;
+      requireValue(freeSlots + roundTrip > 0, 409, `${destination.name} has no free Shared slot right now. Choose another Hub.`);
     }
     db.prepare(`INSERT INTO bookings (id,user_id,vehicle_id,hub_id,status,pickup_deadline,created_at,destination_hub_id,pickup_from)
       VALUES (?,?,?,?, 'Confirmed', ?, ?, ?, ?)`)
@@ -141,7 +142,7 @@ export function pickupBooking({ user, bookingId }) {
     auditChange('Booking', bookingId, 'SHARED_VEHICLE_PICKED_UP', {}, user.id);
   });
   requireValue(!windowElapsed, 409,
-    `The ${config.booking.pickupHoldMinutes}-minute pickup window has elapsed. The booking is now Expired and one violation point was recorded (BR-11, BR-52). You may create a new booking.`);
+    `The ${config.booking.pickupHoldMinutes}-minute pickup window has elapsed. The booking is now Expired (BR-11). You may create a new booking.`);
   return db.prepare('SELECT * FROM bookings WHERE id=?').get(bookingId);
 }
 

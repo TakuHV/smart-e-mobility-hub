@@ -5,7 +5,7 @@ import { Countdown, ElapsedBar } from '../components/Timers';
 import { BackHeader, Battery, Choice, Chips, TimeFields, toInt, todayAt, clockText, useLoad, useAction } from './ui';
 
 const pad2 = n => String(n).padStart(2, '0');
-const START = [{ value: 5, label: 'In 5 min' }, { value: 10, label: 'In 10 min' }, { value: 15, label: 'In 15 min' }];
+const START = [{ value: 0, label: 'Now' }, { value: 5, label: 'In 5 min' }, { value: 10, label: 'In 10 min' }, { value: 15, label: 'In 15 min' }];
 const hhmm = value => new Date(value).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
 
 export default function ChargeFlow({ user, onClose }) {
@@ -15,7 +15,7 @@ export default function ChargeFlow({ user, onClose }) {
   const [vehicleId, setVehicleId] = useState('');
   const [hubId, setHubId] = useState('');
   const [battery, setBattery] = useState('');   // typed by the student
-  const [startIn, setStartIn] = useState(5);
+  const [startIn, setStartIn] = useState(0);
   // The time the student needs the vehicle again is typed (24-hour clock); it starts at two hours from now.
   const [needH, setNeedH] = useState(() => pad2(new Date(virtualNow() + 2 * 3600000).getHours()));
   const [needM, setNeedM] = useState(() => pad2(new Date(virtualNow() + 2 * 3600000).getMinutes()));
@@ -118,7 +118,7 @@ export default function ChargeFlow({ user, onClose }) {
         <div><small>Vehicle</small><h2>{vehicle.plate}</h2></div>
         <div><small>Hub</small><h2>{data.hubs.find(h => h.id === hubId)?.name}</h2></div>
         <Battery level={batteryNumber}/>
-        <div><small>Charging starts</small><h2>in {startIn} minutes</h2></div>
+        <div><small>Charging starts</small><h2>{startIn === 0 ? 'now' : `in ${startIn} minutes`}</h2></div>
         <div><small>Needed at</small><h2>{clockText(n.at)}{n.tomorrow ? ' (tomorrow)' : ''}</h2></div>
       </div>
       <div className="stu-note">Your vehicle must be at the Hub when it is time. After you join we show when it should reach 90%, so you know when to come back.</div>

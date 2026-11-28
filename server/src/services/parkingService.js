@@ -60,6 +60,11 @@ export function createReservation({ user, vehicleId, hubId, slotId, startAt, end
     `Your account is suspended from creating new reservations until ${restriction.suspendedUntil} (BR-59).`);
   const { start, end } = parsePeriod(startAt, endAt);
   requireValue(start.getTime() > clockNow() - 60_000, 400, 'The parking start time must be in the future.');
+  requireValue(end.getTime() - start.getTime() <= config.parking.maxStayHours * 3600000, 400,
+    `You can park for at most ${config.parking.maxStayHours} hours at a time.`);
+  // The stay must end on the day it starts: it cannot run past the Hub's closing time into the night.
+  const day = value => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' }).format(value);
+  requireValue(day(start) === day(end), 400, 'The parking period must end before the Hub closes (the same day).');
   const startIso = start.toISOString();
   const endIso = end.toISOString();
   const reservationId = makeId('parking');
@@ -148,7 +153,7 @@ export function arriveReservation({ user, reservationId }) {
     auditChange('ParkingReservation', reservationId, 'PERSONAL_VEHICLE_ARRIVED', {}, user.id);
   });
   requireValue(!graceElapsed, 409,
-    `The ${config.parking.arrivalGraceMinutes}-minute arrival grace period has elapsed. The reservation is now Expired, the spot is released and one violation point was recorded (BR-12, BR-52).`);
+    `The ${config.parking.arrivalGraceMinutes}-minute arrival grace period has elapsed. The reservation is now Expired, the spot is released (BR-12).`);
   return db.prepare('SELECT * FROM parking_reservations WHERE id=?').get(reservationId);
 }
 

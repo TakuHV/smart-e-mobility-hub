@@ -5,7 +5,8 @@ import { db, nowIso } from '../src/database/db.js';
 import { jump, now as clockNow } from '../src/clock.js';
 import { config, resetConfig } from '../src/config.js';
 import { addUser, makeHub, addSlot, addCharger, addVehicle, row, notificationKinds, later } from './helpers.js';
-import { createBooking, pickupBooking, returnBooking } from '../src/services/vehicleService.js';
+import { createBooking, pickupBooking, returnBooking, createPersonalVehicle } from '../src/services/vehicleService.js';
+import { createReservation } from '../src/services/parkingService.js';
 import { createPersonalChargingRequest, connectPersonalVehicle, startMoveRequest, completeMoveRequest, calculatePriority, rankQueue, runScheduler, stopAutoMove } from '../src/services/chargingService.js';
 import { runTimers, runCycle } from '../src/services/timerService.js';
 import { saveSettings, resetSettings, loadSavedSettings } from '../src/services/settingsService.js';
@@ -48,7 +49,7 @@ test('NI-11: a trip lowers the battery, reminds the student and becomes Overdue 
   const returned = returnBooking({ user: student, bookingId: booking.id, returnSlotId: slot, batteryLevel: afterReminder });
   assert.equal(returned.booking.status, 'Completed');
   assert.ok(returned.tripHours > config.booking.maxTripHours);
-  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, 1);
+  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, 0); // points are out of MVP scope
 });
 
 /* ---------- NI-04 / NI-09: charging progress, end of session, connection window ---------- */
@@ -64,13 +65,13 @@ test('NI-04: a charging session gains battery with the clock and ends at the tar
   connectPersonalVehicle({ user: student, requestId: request.id });
   assert.equal(row('SELECT start_battery FROM charging_requests WHERE id=?', request.id).start_battery, 40);
 
-  jump(50); // 7.2 kW into a 24 kWh car is 30 % per hour: about 25 points
+  jump(8); // 7.2 kW into a 3.5 kWh motorcycle is about 206 % per hour: about 27 points in 8 minutes
   runTimers();
   const mid = row('SELECT battery_level FROM vehicles WHERE id=?', vehicle.id).battery_level;
-  assert.ok(mid >= 62 && mid <= 68, `battery was ${mid}`);
+  assert.ok(mid >= 64 && mid <= 71, `battery was ${mid}`);
   assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Charging');
 
-  jump(70);
+  jump(12);
   runTimers();
   const done = row('SELECT * FROM charging_requests WHERE id=?', request.id);
   assert.equal(done.status, 'Completed');
@@ -91,7 +92,7 @@ test('NI-04: a charging session gains battery with the clock and ends at the tar
   assert.equal(row('SELECT status FROM vehicles WHERE id=?', vehicle.id).status, 'Available');
 });
 
-test('NI-01 / NI-09: an unused charger assignment expires, the student is told and gets one point', () => {
+test('NI-01 / NI-09: an unused charger assignment expires, the student is told (no violation point: out of MVP scope)', () => {
   const student = addUser('Student');
   const hub = makeHub();
   addCharger(hub, 7.2);
@@ -105,7 +106,7 @@ test('NI-01 / NI-09: an unused charger assignment expires, the student is told a
   runCycle();
   assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Expired');
   assert.ok(notificationKinds(student.id).includes('charging_expired'));
-  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, 1);
+  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, 0); // points are out of MVP scope
 });
 
 test('the maximum session length (BR-23) ends a session early when it is set', () => {
@@ -117,9 +118,9 @@ test('the maximum session length (BR-23) ends a session early when it is set', (
     nextRequiredUsageAt: later(5) });
   connectPersonalVehicle({ user: student, requestId: request.id });
   const admin = addUser('Admin');
-  saveSettings({ user: admin, patch: { charging: { maxSessionMinutes: 30 } } });
+  saveSettings({ user: admin, patch: { charging: { maxSessionMinutes: 10 } } });
   try {
-    jump(35);
+    jump(12);
     runTimers();
     assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Completed');
     const battery = row('SELECT battery_level FROM vehicles WHERE id=?', vehicle.id).battery_level;
@@ -179,14 +180,14 @@ test('Admin network: slots, chargers, shared and personal vehicles, Hub settings
   fail(() => addSlots({ user: admin, hubId: hub, slotType: 'Nope', count: 1 }), 400);
   fail(() => addSlots({ user: admin, hubId: hub, slotType: 'Shared', count: 99 }), 400);
 
-  const vehicle = addSharedVehicle({ user: admin, hubId: hub, plate: ' ev 9 001 ', vehicleType: 'Car', connectorType: 'Type2', batteryLevel: 70 });
+  const vehicle = addSharedVehicle({ user: admin, hubId: hub, plate: ' ev 9 001 ', vehicleType: 'Motorcycle', connectorType: 'Type2', batteryLevel: 70 });
   assert.equal(vehicle.plate, 'EV 9 001');
   assert.equal(vehicle.status, 'Available');
   assert.equal(row(`SELECT COUNT(*) AS n FROM parking_slots WHERE hub_id=? AND status='Occupied' AND current_vehicle_id=?`, hub, vehicle.id).n, 1);
-  fail(() => addSharedVehicle({ user: admin, hubId: hub, plate: 'EV 9 001', vehicleType: 'Car', connectorType: 'Type2' }), 409);
+  fail(() => addSharedVehicle({ user: admin, hubId: hub, plate: 'EV 9 001', vehicleType: 'Motorcycle', connectorType: 'Type2' }), 409);
 
   addCharger(hub, 7.2); // a charger exists so that a low-battery vehicle can be queued
-  const low = addSharedVehicle({ user: admin, hubId: hub, plate: 'EV-9-002', vehicleType: 'Car', connectorType: 'Type2', batteryLevel: 10 });
+  const low = addSharedVehicle({ user: admin, hubId: hub, plate: 'EV-9-002', vehicleType: 'Motorcycle', connectorType: 'Type2', batteryLevel: 10 });
   assert.equal(low.status, 'Needs Charging');
   assert.ok(row(`SELECT 1 AS x FROM charging_requests WHERE vehicle_id=?`, low.id), 'a low-battery vehicle joins the charging queue');
 
@@ -198,7 +199,7 @@ test('Admin network: slots, chargers, shared and personal vehicles, Hub settings
 
   const personal = addPersonalVehicle({ user: admin, ownerId: student.id, hubId: hub, plate: 'P-9-001', vehicleType: 'Motorcycle', connectorType: 'GB/T' });
   assert.equal(personal.owner_id, student.id);
-  fail(() => addPersonalVehicle({ user: admin, ownerId: admin.id, hubId: hub, plate: 'P-9-002', vehicleType: 'Car', connectorType: 'Type2' }), 400);
+  fail(() => addPersonalVehicle({ user: admin, ownerId: admin.id, hubId: hub, plate: 'P-9-002', vehicleType: 'Motorcycle', connectorType: 'Type2' }), 400);
 
   const charger = adminAddCharger({ user: admin, hubId: hub, powerKw: 11, connectorTypes: ['Type2'] });
   assert.equal(charger.power_kw, 11);
@@ -321,7 +322,7 @@ test('UC-019: a charger failing during charging stops the session and the charge
   const request = createPersonalChargingRequest({ user: student, vehicleId: vehicle.id, hubId: hub, batteryLevel: 40,
     nextRequiredUsageAt: later(6) });
   connectPersonalVehicle({ user: student, requestId: request.id });
-  jump(30);
+  jump(5);
   runTimers();
 
   const { incident } = reportIncident({ user: operator, category: 'Charger fault', severity: 'High', summary: 'Cable overheating', chargerId });
@@ -418,12 +419,19 @@ test('Return without a free Shared slot at the Hub is refused and the trip stays
   assert.equal(row('SELECT status FROM bookings WHERE id=?', booking.id).status, 'In Progress');
 });
 
-test('Booking: the destination must be a different Hub from the pick-up Hub', () => {
+test('Booking: a round trip is allowed, the destination can be the pick-up Hub', () => {
   const student = addUser('Student');
   const hub = makeHub();
-  const slot = addSlot(hub, 'Shared'); addSlot(hub, 'Shared');
+  const slot = addSlot(hub, 'Shared');                 // the only Shared slot: it is free again once the vehicle has left
   const vehicle = addVehicle({ kind: 'shared', hubId: hub, battery: 80, slotId: slot });
-  fail(() => createBooking({ user: student, vehicleId: vehicle.id, destinationHubId: hub }), 400);
+  const booking = createBooking({ user: student, vehicleId: vehicle.id, destinationHubId: hub });
+  assert.equal(booking.destination_hub_id, hub);
+  pickupBooking({ user: student, bookingId: booking.id });
+  jump(10); runTimers();
+  const result = returnBooking({ user: student, bookingId: booking.id });
+  assert.equal(result.booking.status, 'Completed');
+  assert.equal(row('SELECT hub_id FROM vehicles WHERE id=?', vehicle.id).hub_id, hub);
+  assert.equal(row('SELECT current_vehicle_id FROM parking_slots WHERE id=?', slot).current_vehicle_id, vehicle.id);
 });
 
 test('Admin: create users, change roles, deactivate accounts, and always keep one active Admin', () => {
@@ -677,16 +685,16 @@ test('A personal vehicle that is not collected 5 minutes after 100% is moved to 
 /* ---------- Priority: slack-based urgency and the displacement margin (worst cases) ---------- */
 test('Priority: urgency uses slack (time left minus charging time); a deadline that can still be missed by a little is class H, one that cannot be met is class X; no time = no urgency', () => {
   const at = minutes => new Date(clockNow() + minutes * 60000).toISOString();
-  const base = { vehicle_type: 'Car', registered_at: nowIso() };
-  // Car: 7.2 kW charger, 24 kWh, so 40% -> 100% takes 120 minutes and 90% -> 100% takes 20 minutes.
-  const longJob = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(130) });   // slack about 10
-  const shortJob = calculatePriority({ ...base, battery_level: 90, next_required_usage_at: at(60) });   // slack about 40
+  const base = { vehicle_type: 'Motorcycle', registered_at: nowIso() };
+  // Motorcycle: reference charger 1 kW, 3.5 kWh, so 40% -> 100% takes 126 minutes and 90% -> 100% takes 21 minutes.
+  const longJob = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(150) });   // slack 24
+  const shortJob = calculatePriority({ ...base, battery_level: 90, next_required_usage_at: at(60) });   // slack 39
   assert.ok(longJob.components.urgency > shortJob.components.urgency, 'the long job with little spare time is more urgent');
-  assert.ok(Math.abs(longJob.components.slack - 10) < 0.5);
-  const late = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(110) });      // needs 120 min, has 110: late by 10, can still be saved
+  assert.ok(Math.abs(longJob.components.slack - 24) < 0.5);
+  const late = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(120) });      // needs 126 min, has 120: late by 6, can still be saved
   assert.equal(late.cls, 'H');
   assert.equal(late.components.urgency, 100);
-  const impossible = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(30) }); // needs 120 min, has 30: late by 90
+  const impossible = calculatePriority({ ...base, battery_level: 40, next_required_usage_at: at(60) });  // needs 126 min, has 60: late by 66
   assert.equal(impossible.cls, 'X', 'it cannot be saved any more');
   assert.equal(impossible.components.urgency, 100);
   assert.ok(impossible.components.slack < 0);
@@ -753,19 +761,19 @@ test('Priority: a vehicle that cannot be saved (class X) is ranked behind the ot
   const hub = makeHub();
   for (let i = 0; i < 6; i++) addSlot(hub, 'Holding');
   const charger = addCharger(hub);
-  // Only one charger. A cannot be ready in time (needs 140 min, has 100), B can still make it (needs 40 min, has 50).
+  // Only one charger. A cannot be ready in time (needs 147 min, has 5), B can still make it (needs 42 min, has 60).
   const a = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 30 });
   const bOwner = addUser('Student');
   const b = addVehicle({ kind: 'personal', hubId: hub, ownerId: bOwner.id, battery: 80 });
   const busy = addVehicle({ kind: 'personal', hubId: hub, ownerId: addUser('Student').id, battery: 50 });
   const first = createPersonalChargingRequest({ user: db.prepare('SELECT * FROM users WHERE id=?').get(busy.owner_id), vehicleId: busy.id, hubId: hub, batteryLevel: 50, nextRequiredUsageAt: later(10) });
   assert.equal(first.status, 'Assigned');
-  const ra = createPersonalChargingRequest({ user: student, vehicleId: a.id, hubId: hub, batteryLevel: 30, nextRequiredUsageAt: later(100 / 60) });
-  const rb = createPersonalChargingRequest({ user: bOwner, vehicleId: b.id, hubId: hub, batteryLevel: 80, nextRequiredUsageAt: later(50 / 60) });
+  const ra = createPersonalChargingRequest({ user: student, vehicleId: a.id, hubId: hub, batteryLevel: 30, nextRequiredUsageAt: later(5 / 60) });
+  const rb = createPersonalChargingRequest({ user: bOwner, vehicleId: b.id, hubId: hub, batteryLevel: 80, nextRequiredUsageAt: later(60 / 60) });
   assert.equal(row('SELECT status FROM charging_requests WHERE id=?', ra.id).status, 'Queued', 'A is X and does not displace the vehicle that is charging');
   assert.equal(row('SELECT status FROM charging_requests WHERE id=?', rb.id).status, 'Queued');
   const ranked = rankQueue(hub);
-  assert.equal(ranked[0].id, rb.id, 'B (can still be saved) goes first');
+  assert.equal(ranked[0].id, rb.id, 'B (not late) goes first');
   assert.equal(ranked[1].id, ra.id, 'A (cannot be saved) goes behind');
   assert.equal(ranked[1].cls, 'X');
   assert.ok(charger);
@@ -776,8 +784,75 @@ test('Priority: a class X vehicle is still charged when nobody else needs the ch
   const hub = makeHub();
   const charger = addCharger(hub);
   const car = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 30 });
-  const request = createPersonalChargingRequest({ user: student, vehicleId: car.id, hubId: hub, batteryLevel: 30, nextRequiredUsageAt: later(30 / 60) }); // needs 140 min, has 30
-  assert.equal(calculatePriority({ battery_level: 30, vehicle_type: 'Car', next_required_usage_at: later(30 / 60), registered_at: nowIso() }).cls, 'X');
+  const request = createPersonalChargingRequest({ user: student, vehicleId: car.id, hubId: hub, batteryLevel: 30, nextRequiredUsageAt: later(5 / 60) }); // needs 147 min, has 5
+  assert.equal(calculatePriority({ battery_level: 30, vehicle_type: 'Motorcycle', next_required_usage_at: later(5 / 60), registered_at: nowIso() }).cls, 'X');
   assert.equal(request.status, 'Assigned');
   assert.equal(row('SELECT charger_id FROM charging_requests WHERE id=?', request.id).charger_id, charger);
+});
+
+/* ---------- Motorcycles only, pickup message on a clock jump, parking limit ---------- */
+test('Only motorcycles are accepted: Car is refused for personal and shared vehicles', () => {
+  const admin = addUser('Admin');
+  const student = addUser('Student');
+  const hub = makeHub();
+  addSlot(hub, 'Shared');
+  fail(() => createPersonalVehicle({ user: student, plate: 'CAR-0001', vehicleType: 'Car', connectorType: 'Type2', hubId: hub }), 400);
+  fail(() => addSharedVehicle({ user: admin, hubId: hub, plate: 'CAR-0002', vehicleType: 'Car', connectorType: 'Type2' }), 400);
+  const ok = createPersonalVehicle({ user: student, plate: 'MOTO-0001', hubId: hub }); // type and connector default
+  assert.equal(ok.vehicle_type, 'Motorcycle');
+  assert.equal(ok.connector_type, 'Type2');
+  assert.deepEqual(db.prepare(`SELECT DISTINCT vehicle_type FROM vehicles WHERE id LIKE 'vehicle-%' OR kind='shared' AND id NOT LIKE 'test-%'`).all().map(r => r.vehicle_type), ['Motorcycle']);
+});
+
+test('The 90% message is sent even when a clock jump goes past 90% to the end in one step', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  addCharger(hub);
+  const car = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 50 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: car.id, hubId: hub, batteryLevel: 50, nextRequiredUsageAt: later(3) });
+  connectPersonalVehicle({ user: student, requestId: request.id });
+  jump(30); runTimers();                      // 50% -> 100% in a single step
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Completed');
+  const kinds = notificationKinds(student.id);
+  assert.ok(kinds.includes('charging_pickup_notice'), 'the 90% message was sent');
+  assert.ok(kinds.includes('charging_complete'));
+  runTimers();
+  assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM notifications WHERE user_id=? AND kind='charging_pickup_notice'`).get(student.id).n, 1, 'sent only once');
+});
+
+test('Parking: at most 8 hours, and the stay must end the same day before the Hub closes', () => {
+  const student = addUser('Student');
+  const hub = makeHub();                       // open 00:00-23:59
+  const slots = [addSlot(hub, 'Personal'), addSlot(hub, 'Personal'), addSlot(hub, 'Personal')];
+  const car = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 60 });
+  // Put the demo clock at 20:00 Vietnam time (UTC+7) so that the periods below are deterministic.
+  const vnMinutes = (Math.floor(clockNow() / 60000) + 7 * 60) % (24 * 60);
+  jump(((20 * 60 - vnMinutes) + 24 * 60) % (24 * 60) || 24 * 60);
+  const at = minutes => new Date(clockNow() + minutes * 60000).toISOString();
+  const book = (slotId, from, to) => createReservation({ user: student, vehicleId: car.id, hubId: hub, slotId, startAt: at(from), endAt: at(to) });
+  fail(() => book(slots[0], 10, 10 + 9 * 60), 400);          // 9 hours is too long
+  fail(() => book(slots[0], 10, 10 + 4 * 60 + 5), 400);      // 20:10 -> 00:15 crosses midnight
+  const ok = book(slots[0], 10, 10 + 3 * 60);                // 20:10 -> 23:10
+  assert.equal(ok.status, 'Confirmed');
+});
+
+test('Demo data: chargers and Hub Power Limits come from the configuration and charging takes about 3.5 hours', () => {
+  const power = config.demoData.seedChargerPowerKw;
+  assert.equal(power, 1);
+  assert.deepEqual(db.prepare(`SELECT DISTINCT power_kw FROM chargers WHERE id LIKE 'hub-%'`).all().map(r => r.power_kw), [power]);
+  for (const [hub, kw] of Object.entries(config.demoData.seedHubPowerLimitsKw)) {
+    assert.equal(row('SELECT power_limit_kw FROM hubs WHERE id=?', hub).power_limit_kw, kw);
+  }
+  const student = addUser('Student');
+  const hub = makeHub();
+  addCharger(hub, power);
+  const moto = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 50 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: moto.id, hubId: hub, batteryLevel: 50, nextRequiredUsageAt: later(6) });
+  connectPersonalVehicle({ user: student, requestId: request.id });
+  jump(60); runTimers();                         // 1 kW into 3.5 kWh: about 29 points per hour
+  const mid = row('SELECT battery_level FROM vehicles WHERE id=?', moto.id).battery_level;
+  assert.ok(mid >= 77 && mid <= 80, `battery was ${mid}`);
+  jump(50); runTimers();                         // 50% -> 100% takes about 105 minutes in total
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Completed');
+  assert.ok(notificationKinds(student.id).includes('charging_pickup_notice'));
 });
