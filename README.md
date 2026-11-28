@@ -62,34 +62,66 @@ The MVP uses one web client, one Express backend and one SQLite database. Seeded
 
 > `node:sqlite` is an experimental Node.js API in some Node 22 releases and may display an experimental warning. Use a current Node 22/24 release for the project demo.
 
-## Run locally
+## Getting started (first time after cloning)
 
-Open a terminal in the project root:
+What the repository contains and what it does not:
 
-```bash
-npm install
-npm run dev
-```
+- **Included:** all source code, `data/configuration.json` (editable parameters) and `docs/`.
+- **Not included (created on your machine):** `node_modules/` (installed by npm) and the SQLite database `data/smart_e_mobility.sqlite` (created and seeded automatically on the first start). Nothing needs to be installed or configured by hand besides Node.js.
 
-- React/Vite client: <http://localhost:5173>
-- Express API: <http://localhost:4000/api>
-- Health check: <http://localhost:4000/api/health>
-- SQLite file: `data/smart_e_mobility.sqlite` (created automatically)
+1. **Install Node.js 22.13 or later** (a current 22 or 24 release is best). Check with `node -v`. An older version fails at start because `node:sqlite` is missing.
+2. **Clone and install.** One `npm install` in the project root installs the server and the client (npm workspaces):
 
-The database is initialized from `server/src/database/schema.sql` and seeded on first backend start. To build the frontend:
+   ```bash
+   git clone https://github.com/TakuHV/smart-e-mobility-hub.git
+   cd smart-e-mobility-hub
+   npm install
+   ```
 
-```bash
-npm run build
-```
+3. **Start both servers** from the project root:
 
-To reseed from a clean state, stop the server, delete `data/smart_e_mobility.sqlite` and its `-shm` / `-wal` companions, then run `npm run dev` again. **This deletes demo records.**
+   ```bash
+   npm run dev
+   ```
+
+   - React/Vite client: <http://localhost:5173> (open this one)
+   - Express API: <http://localhost:4000/api>, health check <http://localhost:4000/api/health>
+   - SQLite file: `data/smart_e_mobility.sqlite`. The first start creates the tables from `server/src/database/schema.sql` and loads the demo data (see "Demo data and accounts" below).
+
+4. **Sign in** on the login page by account name (there is no password; the demo runs on localhost only).
+
+Useful commands (all from the project root):
+
+| Command | What it does |
+|---|---|
+| `npm run dev` | Server and client with automatic reload |
+| `npm test` | Backend tests (in-memory database, the real database is not touched) |
+| `npm run build` | Production build of the client |
+| `npm run seed` | Loads the demo data into an empty database |
+
+### Demo data and accounts
+
+- **Accounts and data:** see "Demo accounts" and "Seed data" below. In short: `Student`, `Operator`, `Simulation Operator`, `Admin` and `Demo` (all roles), plus `student1` to `student5` with a parked motorcycle each at Hub A.
+- **Reset the demo:** sign in as `Admin` and use Reset demo. It clears the data, restores the demo data and puts the demo clock back to real time. Alternatively stop the server, delete `data/smart_e_mobility.sqlite` and its `-shm` / `-wal` files, and start again. **Both delete all demo records.**
+- **Demo clock:** the chip at the top shows the demo time. An Operator or Admin can change the speed or jump ahead (+5 min, +15 min, +1 h, +3 h). The Student's "Waiting for a charger" screen also has a "+45s demo clock (demo only)" button.
+
+### Troubleshooting
+
+| Problem | Cause and fix |
+|---|---|
+| `Port 4000 is already in use` | Another program uses the port. Stop it, or start with another port, for example `PORT=4001 npm run dev` (on Windows PowerShell: `$env:PORT=4001; npm run dev`). |
+| `No such built-in module: node:sqlite` or a syntax error at start | Node.js is too old. Install version 22.13 or later. |
+| `ExperimentalWarning: SQLite is an experimental feature` | A normal notice from Node.js. It can be ignored. |
+| `FOREIGN KEY constraint failed` at start after pulling new code | The old local database does not match the new demo data. Stop the server, delete `data/smart_e_mobility.sqlite` with its `-shm` / `-wal` files, and start again. |
+| The page opens but shows no data or network errors | The API is not running. Check the terminal for errors and open `http://localhost:4000/api/health`. |
+| Changed code but the screen does not update | Server code reloads by itself (`node --watch`); a change in `data/configuration.json` or the seed needs Reset demo. |
 
 ## Supporting behaviour of the MVP flows
 
 - **Timers and notifications** (`server/src/services/timerService.js`, `notificationService.js`): pickup hold (15 minutes), trip time against the 3-hour limit, parking arrival/leave, charger connect window, charging progress and overstay warnings. Visible countdowns are in `client/src/components/Timers.jsx`; the bell lists notifications.
 - **Student app** (`client/src/student/`): large, simple layout with five tiles (Book a vehicle, Park my vehicle, Charge my vehicle, Report a problem, View Hubs) and a bottom bar (Home, History, Alerts, Profile). A booking stores the destination Hub; the trip screen has one "I have arrived" button, the battery is the simulated level (not typed by the student) and the return slot is chosen automatically. Students do not see Hub totals.
 - **Automatic charging of shared vehicles** (`server/src/services/chargingService.js`): shared vehicles charge in three bands (`charging.sharedMandatoryBelowPercent` 60, `charging.sharedStopPercent` 90). Below 60% a vehicle must charge: it is queued when a charger is free, and when every charger is busy it takes the charger of a vehicle that only uses idle charger time. From 60% to 90% it uses idle chargers only (a free charger and nobody waiting), lowest battery first; from 90% to 100% only after every vehicle below 90% has a charger. A vehicle that reaches 90% while someone needs a charger stops there; otherwise it goes on to 100% without an extra move. A vehicle stays on its charger until it stops, so a charge costs two moves only, and a vehicle at 60% or more rests `charging.sharedRestMinutes` (10) after it left a charger. A shared vehicle at 90% or more that is charging always gives way to a personal request. A shared vehicle stays *Available* (bookable) while it charges once it has at least 30% battery; below 30% it is *Needs Charging*. Parking slots have no chargers: the vehicle is taken to the charger by a Move Vehicle Request (BR-46) and its Shared slot stays reserved (BR-39).
-- **Move Vehicle Requests are sent automatically** after a countdown (`charging.moveAutoSendSeconds`, 15 s). An Operator can press **Stop** during the countdown to handle the request by hand. Field Staff moves (shared vehicles, Holding) are simulated and finish after `charging.fieldMoveSeconds`; the owner moves a personal vehicle and is told to do so.
+- **Move Vehicle Requests are sent automatically** after a countdown (`charging.moveAutoSendSeconds`, 15 s). An Operator can press **Pause** during the countdown (and **Resume** later) to handle the request by hand. Field Staff moves (shared vehicles, Holding) are simulated and finish after `charging.fieldMoveSeconds`; the owner moves a personal vehicle and is told to do so.
 - **Personal charging request**: the student chooses the vehicle and Hub, types the battery level and the time the vehicle is needed (hour and minute), and chooses to start in 5, 10 or 15 minutes. The app shows when the vehicle should reach 90%; the owner is notified at 90% and charging continues to 100%. A vehicle with a parking reservation cannot be given a charging request for an overlapping period, and the other way round; requests for a later period are allowed.
 - **Check before joining (class X)**: when a student confirms a personal charging request, the server first calculates (`POST /api/charging/preview`) whether the vehicle could be ready in time. If it would be class X, the app explains why and offers to choose a later time (a realistic time is suggested), join anyway, or not register. A class X request can still take the charger of a shared vehicle that has no Next Required Usage Time, but never anything else.
 - **Priority and displacement**: when no charger is free, the priority (Battery Level, Next Required Usage Time, Waiting Duration, class H) of the waiting personal request is compared with every shared vehicle that is charging. Urgency uses slack (minutes until the required time minus the minutes needed to charge to 100%, at the reference charger power `demoData.seedChargerPowerKw`); slack of 0 or less puts the vehicle in class H. A vehicle whose slack is below `charging.scheduler.hopelessSlackMinutes` (default −30, it cannot be ready in time even if charged now) is class X and is ranked behind class L, so it never takes a charger from a vehicle that can still be saved; it is charged when nobody else needs the charger. A shared vehicle is displaced only when the waiting request is clearly ahead (class H against class L, or a score at least `charging.scheduler.preemptMarginPoints` higher, default 10). It stops at its current battery level and its charger goes to the personal request. A booked shared vehicle, and a vehicle already at `preemptMaxBatteryPercent` (default 90%) or more, is never displaced.
