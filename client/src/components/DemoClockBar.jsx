@@ -30,7 +30,7 @@ export default function DemoClockBar({ user }) {
             {(clock.speeds || []).map(s => <button key={s} className={`button small ${clock.speed === s ? 'primary' : 'ghost'}`} disabled={busy} onClick={() => act({ speed: s })}>×{s}</button>)}
           </div>
           <div className="clock-row">
-            {[5, 15, 60].map(m => <button key={m} className="button small secondary" disabled={busy} onClick={() => act({ jumpMinutes: m })}>+{m} min</button>)}
+            {[5, 15, 60, 180].map(m => <button key={m} className="button small secondary" disabled={busy} onClick={() => act({ jumpMinutes: m })}>{m >= 60 ? `+${m / 60} h` : `+${m} min`}</button>)}
           </div>
           {error && <div className="feedback is-error">{error}</div>}
         </> : <span className="helper-text">Time moves at ×{clock.speed}. Operators control the demo clock.</span>}

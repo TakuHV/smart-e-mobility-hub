@@ -64,7 +64,7 @@ function SettingsPanel({ settings, onSaved, setError, setSuccess }) {
 function HubPanel({ hub, data, act }) {
   const [slot, setSlot] = useState({ slotType: 'Shared', count: 1 });
   const [charger, setCharger] = useState({ powerKw: 7, connectorTypes: ['Type2'] });
-  const [vehicle, setVehicle] = useState({ plate: '', vehicleType: 'Car', connectorType: 'Type2', batteryLevel: 80 });
+  const [vehicle, setVehicle] = useState({ plate: '', vehicleType: 'Motorcycle', connectorType: 'Type2', batteryLevel: 80 });
   const [edit, setEdit] = useState({ name: hub.name, powerLimitKw: hub.power_limit_kw, openTime: hub.open_time, closeTime: hub.close_time });
   return <section className="card-surface padded section-gap">
     <div className="subsection-title"><strong>{hub.name}</strong><StatusBadge value={hub.status}/></div>

@@ -22,10 +22,12 @@ export const makeHub = ({ power = 30 } = {}) => {
 export const addSlot = (hubId, type = 'Shared', code = null) => {
   const id = makeId('test-slot');
   db.prepare(`INSERT INTO parking_slots (id,hub_id,code,slot_type,supported_vehicle_types_json,status,updated_at)
-    VALUES (?,?,?,?,?,'Available',?)`).run(id, hubId, code ?? `${type[0]}-${id.slice(-5)}`, type, JSON.stringify(['Car', 'Motorcycle']), nowIso());
+    VALUES (?,?,?,?,?,'Available',?)`).run(id, hubId, code ?? `${type[0]}-${id.slice(-5)}`, type, JSON.stringify(['Motorcycle']), nowIso());
   return id;
 };
 
+// Test chargers are fast (7.2 kW) so that a charging session takes only minutes on the demo clock. The demo data uses the realistic power
+// from data/configuration.json (demoData.seedChargerPowerKw, 1 kW).
 export const addCharger = (hubId, powerKw = 7.2, code = null) => {
   const id = makeId('test-charger');
   db.prepare(`INSERT INTO chargers (id,hub_id,code,connector_types_json,power_kw,status,updated_at)
@@ -36,7 +38,7 @@ export const addCharger = (hubId, powerKw = 7.2, code = null) => {
 export const addVehicle = ({ kind, hubId, ownerId = null, battery = 64, connector = 'Type2', slotId = null }) => {
   const id = makeId('test-vehicle');
   db.prepare(`INSERT INTO vehicles (id,plate,vehicle_type,connector_type,kind,hub_id,owner_id,battery_level,status,updated_at)
-    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, `TEST-${id.slice(-8)}`, 'Car', connector, kind, hubId, ownerId, battery, battery < 30 ? 'Needs Charging' : 'Available', nowIso());
+    VALUES (?,?,?,?,?,?,?,?,?,?)`).run(id, `TEST-${id.slice(-8)}`, 'Motorcycle', connector, kind, hubId, ownerId, battery, battery < 30 ? 'Needs Charging' : 'Available', nowIso());
   if (slotId) db.prepare(`UPDATE parking_slots SET status='Occupied', current_vehicle_id=? WHERE id=?`).run(id, slotId);
   return db.prepare('SELECT * FROM vehicles WHERE id=?').get(id);
 };

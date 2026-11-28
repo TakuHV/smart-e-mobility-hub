@@ -13,8 +13,12 @@ export function requireValue(condition, status, message) {
   if (!condition) throw new HttpError(status, message);
 }
 
+// Violation points are described in Submission 1 but are out of scope for this MVP: nothing is recorded, so no student is
+// ever penalised or suspended. Set to true to bring the recording back.
+const RECORD_VIOLATIONS = false;
+
 export function addViolation(userId, points, reason, sourceType, sourceId) {
-  if (!userId || points <= 0) return;
+  if (!RECORD_VIOLATIONS || !userId || points <= 0) return;
   const recordedAt = nowIso();
   const expiresAt = new Date(clockNow() + 14 * 24 * 60 * 60 * 1000).toISOString();
   db.prepare(`INSERT INTO violations

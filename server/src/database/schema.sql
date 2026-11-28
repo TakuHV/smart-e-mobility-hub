@@ -51,7 +51,7 @@ CREATE TABLE IF NOT EXISTS parking_slots (
   hub_id TEXT NOT NULL REFERENCES hubs(id),
   code TEXT NOT NULL,
   slot_type TEXT NOT NULL CHECK (slot_type IN ('Shared','Personal','Holding')),
-  supported_vehicle_types_json TEXT NOT NULL DEFAULT '["Motorcycle","Car"]',
+  supported_vehicle_types_json TEXT NOT NULL DEFAULT '["Motorcycle"]',
   status TEXT NOT NULL DEFAULT 'Available',
   current_vehicle_id TEXT REFERENCES vehicles(id),
   updated_at TEXT NOT NULL,

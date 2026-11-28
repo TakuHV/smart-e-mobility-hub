@@ -5,7 +5,7 @@
 
   "booking": { "pickupHoldMinutes": 15, "minimumBatteryToBookPercent": 30, "maxTripHours": 3 },
 
-  "parking": { "arrivalGraceMinutes": 15, "overstayGraceMinutes": 15, "sharedReturnReservePercent": 10, "holdingFreeReservePercent": 40 },
+  "parking": { "maxStayHours": 8, "arrivalGraceMinutes": 15, "overstayGraceMinutes": 15, "sharedReturnReservePercent": 10, "holdingFreeReservePercent": 40 },
 
   "thresholds": {
     "parkingWarningPercent": 80,
@@ -32,7 +32,7 @@
       "preemptMaxBatteryPercent": 90,
       "urgencyHorizonMinutes": 240,
       "waitingDivisorMinutes": 3,
-      "estimatedSessionMinutes": 45,
+      "estimatedSessionMinutes": 120,
       "note": "Proposed Values (Technical Design Document 2.2). The estimated session length only feeds the queue-time estimate, which is not a guarantee (BR-43). No replacement threshold or maximum session duration is applied. The Hub Power Limit is a capacity limit, not a weight."
     }
   },
@@ -41,7 +41,7 @@
 
   "demoData": {
     "note": "Seed values for the classroom demonstration; they are not approved operating parameters. The Central Hub limit equals one charger so that the Hub Power Limit rule is visible in the demo.",
-    "seedHubPowerLimitsKw": { "hub-central": 7.2, "hub-engineering": 14.4, "hub-library": 14.4 },
-    "seedChargerPowerKw": 7.2
+    "seedHubPowerLimitsKw": { "hub-central": 3, "hub-engineering": 3, "hub-library": 3 },
+    "seedChargerPowerKw": 1
   }
 }

@@ -13,6 +13,7 @@ const limits = () => ({
   tripReminderMinutes: config.reminders.tripReminderMinutes,
   lowBatteryWarningPercent: config.reminders.lowBatteryWarningPercent,
   arrivalGraceMinutes: config.parking.arrivalGraceMinutes,
+  maxStayHours: config.parking.maxStayHours,
   overstayGraceMinutes: config.parking.overstayGraceMinutes,
   parkingReminderBeforeEndMinutes: config.reminders.parkingReminderBeforeEndMinutes,
   connectWindowMinutes: config.charging.personalConnectWindowMinutes,

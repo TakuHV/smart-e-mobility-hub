@@ -34,7 +34,7 @@ function runTripTimers(nowMs) {
       db.prepare(`UPDATE bookings SET status='Overdue', overdue_at=? WHERE id=? AND status='In Progress'`).run(new Date(nowMs).toISOString(), trip.id);
       auditChange('Booking', trip.id, 'BOOKING_OVERDUE', { elapsedMinutes: Math.round(elapsed / MIN) }, 'system');
       notify({ userId: trip.user_id, kind: 'trip_overdue', entityType: 'Booking', entityId: trip.id, severity: 'critical', title: 'Trip is overdue',
-        message: `Your trip with ${trip.plate} passed ${config.booking.maxTripHours} hours. Return the vehicle now; a violation point is recorded on return.` });
+        message: `Your trip with ${trip.plate} passed ${config.booking.maxTripHours} hours. Please return the vehicle now.` });
       notifyOperators({ kind: 'trip_overdue_ops', entityType: 'Booking', entityId: trip.id, severity: 'critical', title: 'Overdue shared-vehicle trip',
         message: `${trip.plate} has been out for more than ${config.booking.maxTripHours} hours.` });
     }
