@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../api';
 import { virtualNow, useClockState, skipDemoSeconds } from '../clock';
 import { Countdown, ElapsedBar } from '../components/Timers';
-import { BackHeader, Battery, Choice, Chips, TimeFields, toInt, todayAt, clockText, useLoad, useAction } from './ui';
+import { BackHeader, Battery, Choice, Chips, TimeFields, toInt, todayAt, clockText, useLoad, useAction, normalizeVnPlate } from './ui';
 
 const pad2 = n => String(n).padStart(2, '0');
 const START = [{ value: 0, label: 'Now' }, { value: 5, label: 'In 5 min' }, { value: 10, label: 'In 10 min' }, { value: 15, label: 'In 15 min' }];
@@ -62,7 +62,7 @@ export default function ChargeFlow({ user, onClose }) {
     setWarn(null); setStep(3);
   };
   async function addVehicle() {
-    const r = await run(() => api('/vehicles/personal', { method: 'POST', body: { plate, vehicleType: 'Motorcycle', connectorType: 'Type2', hubId: data.hubs[0]?.id } }));
+    const r = await run(() => api('/vehicles/personal', { method: 'POST', body: { plate: normalizeVnPlate(plate), vehicleType: 'Motorcycle', connectorType: 'Type2', hubId: data.hubs[0]?.id } }));
     if (r) { setPlate(''); setAdding(false); setVehicleId(r.vehicle.id); setHubId(r.vehicle.hub_id || ''); setBattery(String(Math.round(r.vehicle.battery_level ?? 0))); await load(); setStep(2); }
   }
   async function register() {
@@ -124,8 +124,9 @@ export default function ChargeFlow({ user, onClose }) {
       <Choice icon="➕" title="Add a vehicle" hint="Register your motorcycle" onClick={() => setAdding(true)}/>
     </div>}
     {step === 1 && adding && <div className="stu-card">
-      <label>License plate<input value={plate} onChange={e => setPlate(e.target.value)} placeholder="51A-123.45"/></label>
-      <button className="stu-btn" disabled={busy || plate.trim().length < 4} onClick={addVehicle}>Save vehicle</button>
+      <label>License plate<input value={plate} onChange={e => setPlate(e.target.value)} placeholder="51A-123.45" autoCapitalize="characters"/></label>
+        {plate.trim() !== '' && !normalizeVnPlate(plate) && <div className="stu-note">Use a Vietnamese motorcycle plate, for example 59A-123.45 or 62AN-116.30.</div>}
+      <button className="stu-btn" disabled={busy || !normalizeVnPlate(plate)} onClick={addVehicle}>Save vehicle</button>
     </div>}
     {step === 2 && <div className="choice-list">{data.hubs.map(h => <Choice key={h.id} icon="📍" title={h.name} hint={h.open_now ? `Open until ${h.close_time}` : `Closed · opens ${h.open_time}`} disabled={!h.open_now} chosen={hubId === h.id} onClick={() => { setHubId(h.id); setStep(3); }}/>)}</div>}
     {step === 3 && <>

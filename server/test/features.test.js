@@ -5,7 +5,7 @@ import { db, nowIso } from '../src/database/db.js';
 import { jump, now as clockNow } from '../src/clock.js';
 import { config, resetConfig } from '../src/config.js';
 import { addUser, makeHub, addSlot, addCharger, addVehicle, row, notificationKinds, later } from './helpers.js';
-import { createBooking, pickupBooking, returnBooking, createPersonalVehicle } from '../src/services/vehicleService.js';
+import { createBooking, pickupBooking, returnBooking, createPersonalVehicle, normalizeVnMotorcyclePlate } from '../src/services/vehicleService.js';
 import { createReservation } from '../src/services/parkingService.js';
 import { createPersonalChargingRequest, connectPersonalVehicle, startMoveRequest, completeMoveRequest, calculatePriority, rankQueue, runScheduler, stopAutoMove, resumeAutoMove, previewPersonalCharging } from '../src/services/chargingService.js';
 import { runTimers, runCycle } from '../src/services/timerService.js';
@@ -18,8 +18,21 @@ import { userRedirectOverview, createUserRedirect, endUserRedirect, activeRedire
 import { resetDemoData } from '../src/services/demoResetService.js';
 import { demoLogin, ensureDemoAccounts } from '../src/services/authService.js';
 import { reportIncident, acknowledgeIncident, resolveIncident, attentionItems } from '../src/services/incidentService.js';
+import { getViolationSummary } from '../src/services/commonService.js';
 
 const fail = (fn, status) => assert.throws(fn, error => error.status === status, `expected HTTP ${status}`);
+
+/* ---------- A booking remembers the Shared slot where the vehicle waits ---------- */
+test('A booking stores the Shared slot where the vehicle waits, so the student can find it', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  const slot = addSlot(hub, 'Shared');
+  const vehicle = addVehicle({ kind: 'shared', hubId: hub, battery: 90, slotId: slot });
+  const code = row('SELECT code FROM parking_slots WHERE id=?', slot).code;
+  const booking = createBooking({ user: student, vehicleId: vehicle.id });
+  assert.equal(row('SELECT pickup_slot_code FROM bookings WHERE id=?', booking.id).pickup_slot_code, code);
+  assert.equal(row('SELECT status FROM parking_slots WHERE id=?', slot).status, 'Available'); // the slot itself is free again (BR-39)
+});
 
 /* ---------- NI-11: shared-vehicle trip timers ---------- */
 test('NI-11: a trip lowers the battery, reminds the student and becomes Overdue after the limit', () => {
@@ -49,7 +62,7 @@ test('NI-11: a trip lowers the battery, reminds the student and becomes Overdue 
   const returned = returnBooking({ user: student, bookingId: booking.id, returnSlotId: slot, batteryLevel: afterReminder });
   assert.equal(returned.booking.status, 'Completed');
   assert.ok(returned.tripHours > config.booking.maxTripHours);
-  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, 0); // points are out of MVP scope
+  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, 1); // the overdue trip costs 1 violation point
 });
 
 /* ---------- NI-04 / NI-09: charging progress, end of session, connection window ---------- */
@@ -92,7 +105,7 @@ test('NI-04: a charging session gains battery with the clock and ends at the tar
   assert.equal(row('SELECT status FROM vehicles WHERE id=?', vehicle.id).status, 'Available');
 });
 
-test('NI-01 / NI-09: an unused charger assignment expires, the student is told (no violation point: out of MVP scope)', () => {
+test('NI-01 / NI-09: an unused charger assignment expires, the student is told and gets 1 violation point', () => {
   const student = addUser('Student');
   const hub = makeHub();
   addCharger(hub, 7.2);
@@ -106,7 +119,11 @@ test('NI-01 / NI-09: an unused charger assignment expires, the student is told (
   runCycle();
   assert.equal(row('SELECT status FROM charging_requests WHERE id=?', request.id).status, 'Expired');
   assert.ok(notificationKinds(student.id).includes('charging_expired'));
-  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, 0); // points are out of MVP scope
+  assert.equal(row('SELECT COUNT(*) AS n FROM violations WHERE user_id=?', student.id).n, 1); // the unused assignment costs 1 violation point
+  const summary = getViolationSummary(student.id);
+  assert.equal(summary.activePoints, 1);
+  assert.equal(summary.threshold, 5);
+  assert.equal(summary.isSuspended, false);
 });
 
 test('the maximum session length (BR-23) ends a session early when it is set', () => {
@@ -885,12 +902,28 @@ test('Only motorcycles are accepted: Car is refused for personal and shared vehi
   const student = addUser('Student');
   const hub = makeHub();
   addSlot(hub, 'Shared');
-  fail(() => createPersonalVehicle({ user: student, plate: 'CAR-0001', vehicleType: 'Car', connectorType: 'Type2', hubId: hub }), 400);
+  fail(() => createPersonalVehicle({ user: student, plate: '59B-123.45', vehicleType: 'Car', connectorType: 'Type2', hubId: hub }), 400);
   fail(() => addSharedVehicle({ user: admin, hubId: hub, plate: 'CAR-0002', vehicleType: 'Car', connectorType: 'Type2' }), 400);
-  const ok = createPersonalVehicle({ user: student, plate: 'MOTO-0001', hubId: hub }); // type and connector default
+  const ok = createPersonalVehicle({ user: student, plate: '59A-123.45', hubId: hub }); // type and connector default
   assert.equal(ok.vehicle_type, 'Motorcycle');
   assert.equal(ok.connector_type, 'Type2');
   assert.deepEqual(db.prepare(`SELECT DISTINCT vehicle_type FROM vehicles WHERE id LIKE 'vehicle-%' OR kind='shared' AND id NOT LIKE 'test-%'`).all().map(r => r.vehicle_type), ['Motorcycle']);
+});
+
+test('A personal vehicle needs a Vietnamese motorcycle plate; the plate is stored in the standard form', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  addSlot(hub, 'Shared');
+  // accepted forms, with or without dash, dot, spaces, in lower case
+  assert.equal(normalizeVnMotorcyclePlate('59a12345'), '59A-123.45');
+  assert.equal(normalizeVnMotorcyclePlate(' 62an-116.30 '), '62AN-116.30');
+  assert.equal(normalizeVnMotorcyclePlate('59X1 123.45'), '59X1-123.45');
+  // refused: wrong shape, province below 11, letters that are not used, all zeros, too short or too long
+  for (const bad of ['', 'ABC', 'MOTO-0001', '10A-123.45', '59I-123.45', '59A-000.00', '59A-1234', '59A-123.456', '5A-123.45', '59AAA-123.45']) {
+    assert.equal(normalizeVnMotorcyclePlate(bad), null, bad);
+  }
+  fail(() => createPersonalVehicle({ user: student, plate: 'MOTO-0001', hubId: hub }), 400);
+  assert.equal(createPersonalVehicle({ user: student, plate: '51d12345', hubId: hub }).plate, '51D-123.45');
 });
 
 test('The 90% message is sent even when a clock jump goes past 90% to the end in one step', () => {

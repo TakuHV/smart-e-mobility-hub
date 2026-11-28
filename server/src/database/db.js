@@ -56,6 +56,7 @@ for (const [table, column, definition] of [
   ['charging_requests', 'overstay_flagged_at', 'TEXT'],
   ['charging_requests', 'available_from', 'TEXT'],
   ['bookings', 'pickup_from', 'TEXT'],
+  ['bookings', 'pickup_slot_code', 'TEXT'],   // the Shared slot where the vehicle waits for its student
   ['move_vehicle_requests', 'auto_send_at', 'TEXT'],
   ['move_vehicle_requests', 'sent_at', 'TEXT'],
   ['move_vehicle_requests', 'destination', "TEXT NOT NULL DEFAULT 'Slot'"]

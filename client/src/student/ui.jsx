@@ -19,6 +19,17 @@ export function Battery({ level, label = 'Battery', charging = false }) {
   return <div className="stu-battery"><div className="row"><span>{label}</span><BatteryIcon level={level} charging={charging} size="lg"/></div></div>;
 }
 
+// Vietnamese motorcycle plate (same rule as the server): 2 digits (11-99), 1-2 series letters, optional digit, then 000.01-999.99.
+// Returns the plate as "59A-123.45", or null when the text is not a valid plate.
+const VN_PLATE = /^(1[1-9]|[2-9]\d)-?([ABCDEFGHKLMNPRSTUVXYZ]{1,2})(\d)?[-\s]?(\d{3})\.?(\d{2})$/;
+export function normalizeVnPlate(value) {
+  const m = VN_PLATE.exec(String(value || '').trim().toUpperCase());
+  return !m || m[4] + m[5] === '00000' ? null : `${m[1]}${m[2]}${m[3] || ''}-${m[4]}.${m[5]}`;
+}
+
+// Small green badge with the word HUB: the picture for a Hub in the lists where a student chooses one.
+export const HubBadge = () => <span className="hub-badge">HUB</span>;
+
 export const Choice = ({ icon, title, hint, right, chosen, disabled, onClick }) =>
   <button type="button" className={`choice ${chosen ? 'chosen' : ''}`} disabled={disabled} onClick={onClick}>
     {icon && <span className="ci" aria-hidden="true">{icon}</span>}

@@ -3,7 +3,7 @@ import { api, query } from '../api';
 import { virtualNow, useNow } from '../clock';
 import { Countdown } from '../components/Timers';
 import { useClockState } from '../clock';
-import { BackHeader, Choice, Chips, TimeFields, toInt, useLoad, useAction, hubHint } from './ui';
+import { BackHeader, Choice, Chips, TimeFields, toInt, useLoad, useAction, hubHint, normalizeVnPlate } from './ui';
 
 const pad2 = n => String(n).padStart(2, '0');
 const ARRIVE = [{ value: 0, label: 'Now' }, { value: 5, label: 'In 5 min' }, { value: 15, label: 'In 15 min' }, { value: 30, label: 'In 30 min' }];
@@ -76,7 +76,7 @@ export default function ParkFlow({ onClose }) {
   const act = (id, name, text) => run(async () => { await api(`/parking/reservations/${id}/${name}`, { method: 'POST', body: {} }); setMessage(text); await load(); });
 
   async function addVehicle() {
-    const r = await run(() => api('/vehicles/personal', { method: 'POST', body: { plate, vehicleType: 'Motorcycle', connectorType: 'Type2', hubId: data.hubs[0]?.id } }));
+    const r = await run(() => api('/vehicles/personal', { method: 'POST', body: { plate: normalizeVnPlate(plate), vehicleType: 'Motorcycle', connectorType: 'Type2', hubId: data.hubs[0]?.id } }));
     if (r) { setPlate(''); setAdding(false); setVehicleId(r.vehicle.id); setHubId(r.vehicle.hub_id || ''); await load(); setStep(2); }
   }
   async function reserve() {
@@ -95,8 +95,9 @@ export default function ParkFlow({ onClose }) {
         <Choice icon="➕" title="Add a vehicle" hint="Register your motorcycle" onClick={() => setAdding(true)}/>
       </div>}
       {step === 1 && adding && <div className="stu-card">
-        <label>License plate<input value={plate} onChange={e => setPlate(e.target.value)} placeholder="51A-123.45"/></label>
-        <button className="stu-btn" disabled={busy || plate.trim().length < 4} onClick={addVehicle}>Save vehicle</button>
+        <label>License plate<input value={plate} onChange={e => setPlate(e.target.value)} placeholder="51A-123.45" autoCapitalize="characters"/></label>
+        {plate.trim() !== '' && !normalizeVnPlate(plate) && <div className="stu-note">Use a Vietnamese motorcycle plate, for example 59A-123.45 or 62AN-116.30.</div>}
+        <button className="stu-btn" disabled={busy || !normalizeVnPlate(plate)} onClick={addVehicle}>Save vehicle</button>
       </div>}
       {step === 2 && <div className="choice-list">
         {data.hubs.map(h => <Choice key={h.id} icon="📍" title={h.name} hint={hubHint(h)} disabled={!h.open_now} chosen={hubId === h.id} onClick={() => { setHubId(h.id); setStep(3); }}/>)}

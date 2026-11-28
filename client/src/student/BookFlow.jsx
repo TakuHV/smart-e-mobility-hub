@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { api } from '../api';
 import { useClockState, useNow } from '../clock';
 import { Countdown, ElapsedBar } from '../components/Timers';
-import { BackHeader, Battery, Choice, Chips, useLoad, useAction, hubHint } from './ui';
+import { BackHeader, Battery, Choice, HubBadge, Chips, useLoad, useAction, hubHint } from './ui';
 
 const PICKUP = [{ value: 0, label: 'Now' }, { value: 5, label: 'In 5 min' }, { value: 15, label: 'In 15 min' }, { value: 30, label: 'In 30 min' }];
 const hhmm = value => new Date(value).toLocaleTimeString('en-GB', { hour: '2-digit', minute: '2-digit' });
@@ -53,7 +53,8 @@ export default function BookFlow({ onClose }) {
   if (active?.status === 'Confirmed') return <>
     <BackHeader title="Pick up your vehicle" onBack={onClose}/>
     <div className="stu-card highlight">
-      <div className="trip-big"><div className="emoji">🛵</div><h2>{active.plate}</h2><p>Waiting for you at <b>{active.hub_name}</b></p></div>
+      <div className="trip-big"><div className="emoji">🛵</div><h2>{active.plate}</h2><p>Waiting for you at <b>{active.hub_name}</b></p>
+        {active.pickup_slot_code && <div className="slot-pick"><small>Parking slot</small><b>{active.pickup_slot_code}</b></div>}</div>
       {active.pickup_from && now < Date.parse(active.pickup_from) - 1000
         ? <div style={{ textAlign: 'center' }}><Countdown until={active.pickup_from} label={`You can pick up from ${hhmm(active.pickup_from)} in`} warnSeconds={0}/></div>
         : <div style={{ textAlign: 'center' }}><Countdown until={active.pickup_deadline} label="Pick up within" overLabel="expired" warnSeconds={180}/></div>}
@@ -105,14 +106,14 @@ export default function BookFlow({ onClose }) {
     <BackHeader title={['', 'Where do you pick up?', 'Choose a vehicle', 'Where are you going?', 'Check and confirm'][step]} onBack={back} step={step} steps={4}/>
     {error && <div className="stu-error" onClick={() => setError('')}>{error}</div>}
     {step === 1 && <div className="choice-list">
-      {data.hubs.map(h => <Choice key={h.id} icon="📍" title={h.name} hint={redirects.find(r => r.from_hub_id === h.id) ? `Busy. Please use ${redirects.find(r => r.from_hub_id === h.id).to_hub_name}` : hubHint(h)} disabled={!h.open_now} onClick={() => { setFromHub(h.id); setVehicleId(''); setStep(2); }}/>)}
+      {data.hubs.map(h => <Choice key={h.id} icon={<HubBadge/>} title={h.name} hint={redirects.find(r => r.from_hub_id === h.id) ? `Busy. Please use ${redirects.find(r => r.from_hub_id === h.id).to_hub_name}` : hubHint(h)} disabled={!h.open_now} onClick={() => { setFromHub(h.id); setVehicleId(''); setStep(2); }}/>)}
     </div>}
     {step === 2 && <div className="choice-list">
       {vehiclesAt(fromHub).length === 0 ? <div className="stu-card"><p>No vehicle is ready at {hubName(fromHub)} right now. Please try another Hub.</p></div>
         : vehiclesAt(fromHub).map(v => <Choice key={v.id} icon={'🛵'} title={v.plate} hint={v.vehicle_type} right={`${v.battery_level}%`} chosen={vehicleId === v.id} onClick={() => { setVehicleId(v.id); setStep(3); }}/>)}
     </div>}
     {step === 3 && <div className="choice-list">
-      {data.hubs.map(h => { const same = h.id === fromHub; const free = same || freeSlotsAt(h.id) > 0; return <Choice key={h.id} icon="🏁" title={h.name} hint={!h.open_now ? 'Closed now' : same ? 'Round trip: bring it back here' : free ? hubHint(h) : 'No free spot right now'} disabled={!h.open_now || !free} chosen={toHub === h.id} onClick={() => { setToHub(h.id); setStep(4); }}/>; })}
+      {data.hubs.map(h => { const same = h.id === fromHub; const free = same || freeSlotsAt(h.id) > 0; return <Choice key={h.id} icon={<HubBadge/>} title={h.name} hint={!h.open_now ? 'Closed now' : same ? 'Round trip: bring it back here' : free ? hubHint(h) : 'No free spot right now'} disabled={!h.open_now || !free} chosen={toHub === h.id} onClick={() => { setToHub(h.id); setStep(4); }}/>; })}
     </div>}
     {step === 4 && chosen && <>
       <div className="stu-card">

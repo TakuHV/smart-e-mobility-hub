@@ -42,7 +42,7 @@ export default function Dispatch() {
   return <>
     <SectionHeader eyebrow="OPERATOR WORKFLOW · UC-018" title="Vehicle & User Redistribution" description="Balance shared vehicles between Hubs. The vehicle is held while it is moved and becomes available again at the destination." action={<RefreshButton onClick={() => load()}/>}/>
     <Feedback error={error} success={success}/>
-    <div className="stats-grid">
+    <div className="stat-grid compact-stats">
       {data.hubs.map(h => <StatCard key={h.id} icon="▦" label={h.name} value={`${h.available} bookable`} detail={`${h.freeSharedSlots}/${h.sharedSlotsTotal} free slots · +${h.incoming} in · −${h.outgoing} out`}/>)}
     </div>
 

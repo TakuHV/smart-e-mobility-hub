@@ -137,7 +137,7 @@ input[type='checkbox'] { width: 16px; height: 16px; accent-color: var(--primary)
 .nav-item:hover { background: var(--surface-3); color: var(--text); }
 .nav-item.active { background: var(--primary-soft); color: var(--primary-strong); }
 .nav-item.active::before { content: ''; position: absolute; left: -16px; top: 9px; bottom: 9px; width: 4px; border-radius: 0 4px 4px 0; background: var(--primary); }
-.nav-icon { width: 20px; text-align: center; font-size: 16px; }
+.nav-icon { width: 22px; text-align: center; font-size: 17px; line-height: 1; }
 .sidebar-bottom { margin-top: auto; }
 .system-status { padding: 10px 12px; margin-bottom: 14px; border: 1px solid var(--line); border-radius: var(--radius-sm); background: var(--surface-2); color: var(--text-2); font-size: 12px; }
 .pulse-dot, .status-dot { display: inline-block; width: 8px; height: 8px; border-radius: 50%; background: #1fb67a; margin-right: 8px; box-shadow: 0 0 0 4px rgba(31, 182, 122, .16); }
@@ -834,3 +834,11 @@ tr.main-account strong { color: var(--primary-strong); }
 /* A shared vehicle that is away charging: blue, dashed border and a lightning bolt, so it is not told apart by colour alone. */
 .slot-tile.charging { background: var(--blue-soft, #e6efff); color: var(--blue, #2b4fb8); border: 1.5px dashed var(--blue, #2b4fb8); }
 .slot-dot.charging { background: var(--blue-soft, #e6efff); border: 1.5px dashed var(--blue, #2b4fb8); }
+
+/* Vehicle redistribution: the three Hub summary cards are small and sit side by side */
+.stat-grid.compact-stats { gap: 10px; margin-bottom: 16px; }
+.compact-stats .stat-card { min-height: 0; padding: 10px 14px; }
+.compact-stats .stat-card::after, .compact-stats .stat-icon { display: none; }
+.compact-stats .stat-label { font-size: 12px; }
+.compact-stats .stat-value { font-size: 20px; margin-top: 2px; }
+.compact-stats .stat-detail { font-size: 11.5px; margin-top: 1px; }

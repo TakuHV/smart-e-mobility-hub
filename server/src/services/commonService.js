@@ -13,9 +13,9 @@ export function requireValue(condition, status, message) {
   if (!condition) throw new HttpError(status, message);
 }
 
-// Violation points are described in Submission 1 but are out of scope for this MVP: nothing is recorded, so no student is
-// ever penalised or suspended. Set to true to bring the recording back.
-const RECORD_VIOLATIONS = false;
+// Violation points (UC-019 / BR-52): 1 point for an unused booking, reservation or charger assignment, and for an overstay.
+// Points expire after 14 days; 5 active points suspend the student from new charging requests. Set to false to stop recording.
+const RECORD_VIOLATIONS = true;
 
 export function addViolation(userId, points, reason, sourceType, sourceId) {
   if (!RECORD_VIOLATIONS || !userId || points <= 0) return;
@@ -34,7 +34,7 @@ export function isStudentSuspended(userId) {
   return result.total >= 5;
 }
 
-// --- CHÈN THÊM ĐOẠN NÀY --- SỬA LẠI SAU ---
+// What a student sees in the profile: active points (not expired, not dismissed), the 5-point limit and each violation.
 export function getViolationSummary(userId) {
   if (!userId) {
     return { total: 0, activePoints: 0, totalPoints: 0, threshold: 5, isSuspended: false, suspended: false, activeCount: 0, violations: [] };

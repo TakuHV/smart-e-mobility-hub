@@ -19,10 +19,22 @@ export function listVehicles({ kind, hubId, user }) {
   return db.prepare(sql).all(...params);
 }
 
+/*
+ * Vietnamese motorcycle plate: 2 digits for the province (11-99), 1 or 2 series letters (optionally followed by a digit),
+ * then 5 digits written as 000.01 to 999.99. Examples: 59A-123.45, 62AN-116.30, 59X1-123.45. Spaces and the dash are optional
+ * when typing. The letters I, J, O, Q and W are not used in series. Returns the plate in the form "59A-123.45", or null.
+ */
+const VN_PLATE = /^(1[1-9]|[2-9]\d)-?([ABCDEFGHKLMNPRSTUVXYZ]{1,2})(\d)?[-\s]?(\d{3})\.?(\d{2})$/;
+export function normalizeVnMotorcyclePlate(value) {
+  const match = VN_PLATE.exec(String(value || '').trim().toUpperCase());
+  if (!match || match[4] + match[5] === '00000') return null;
+  return `${match[1]}${match[2]}${match[3] || ''}-${match[4]}.${match[5]}`;
+}
+
 export function createPersonalVehicle({ user, plate, vehicleType = 'Motorcycle', connectorType = 'Type2', hubId }) {
   requireValue(user?.role === 'Student', 403, 'Only students can add a personal vehicle.');
-  const cleanPlate = String(plate || '').trim().replace(/\s+/g, ' ').toUpperCase();
-  requireValue(cleanPlate.length >= 4, 400, 'Enter a valid license plate.');
+  const cleanPlate = normalizeVnMotorcyclePlate(plate);
+  requireValue(cleanPlate, 400, 'Enter a Vietnamese motorcycle plate, for example 59A-123.45 or 62AN-116.30.');
   requireValue(vehicleType === 'Motorcycle', 400, 'Only motorcycles are supported.');
   requireValue(['Type2', 'GB/T'].includes(connectorType), 400, 'Choose a supported connector type.');
   requireValue(db.prepare('SELECT id FROM hubs WHERE id=?').get(hubId), 404, 'Hub not found.');
@@ -80,6 +92,8 @@ export function createBooking({ user, vehicleId, destinationHubId = null, pickup
     requireValue(reserved.changes === 1, 409, 'Vehicle availability changed. Please select another vehicle.');
     // BR-39: the Shared slot kept for the vehicle is released when a student books it. A vehicle that is on a charger
     // keeps its slot until the student picks it up (it is moved back to that slot first).
+    // The slot is remembered on the booking so the student can be told where to find the vehicle.
+    const pickupSlotCode = db.prepare(`SELECT code FROM parking_slots WHERE current_vehicle_id=? AND slot_type='Shared'`).get(vehicleId)?.code ?? null;
     const onCharger = db.prepare(`SELECT 1 FROM charging_requests WHERE vehicle_id=? AND status IN ('Assigned','Charging')`).get(vehicleId);
     if (!onCharger) db.prepare(`UPDATE parking_slots SET status='Available', current_vehicle_id=NULL, updated_at=?
       WHERE current_vehicle_id=? AND slot_type='Shared'`).run(now, vehicleId);
@@ -92,9 +106,9 @@ export function createBooking({ user, vehicleId, destinationHubId = null, pickup
       const roundTrip = destinationHubId === vehicle.hub_id ? 1 : 0;
       requireValue(freeSlots + roundTrip > 0, 409, `${destination.name} has no free Shared slot right now. Choose another Hub.`);
     }
-    db.prepare(`INSERT INTO bookings (id,user_id,vehicle_id,hub_id,status,pickup_deadline,created_at,destination_hub_id,pickup_from)
-      VALUES (?,?,?,?, 'Confirmed', ?, ?, ?, ?)`)
-      .run(bookingId, user.id, vehicleId, vehicle.hub_id, deadline, now, destinationHubId || null, pickupFrom);
+    db.prepare(`INSERT INTO bookings (id,user_id,vehicle_id,hub_id,status,pickup_deadline,created_at,destination_hub_id,pickup_from,pickup_slot_code)
+      VALUES (?,?,?,?, 'Confirmed', ?, ?, ?, ?, ?)`)
+      .run(bookingId, user.id, vehicleId, vehicle.hub_id, deadline, now, destinationHubId || null, pickupFrom, pickupSlotCode);
     // The vehicle's next use is the pickup time; a booked vehicle never keeps a place in the charging queue.
     db.prepare('UPDATE vehicles SET next_required_usage_at=? WHERE id=?').run(pickupFrom, vehicleId);
     auditChange('Booking', bookingId, 'BOOKING_CONFIRMED', { vehicleId, pickupFrom, pickupDeadline: deadline, destinationHubId }, user.id);

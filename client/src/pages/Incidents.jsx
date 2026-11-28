@@ -49,7 +49,7 @@ export default function Incidents({ user }) {
         <div key={idx} className={`attention-item ${a.severity}`}><div><strong>{a.title}</strong><span>{a.detail}</span></div><small>{new Date(a.since).toLocaleTimeString('en-GB')}</small></div>)}
     </section>}
 
-    <section className="card-surface padded section-gap">
+    {!isOps && <section className="card-surface padded section-gap">
       <div className="subsection-title"><strong>Report a problem</strong></div>
       <div className="form-grid">
         <label>Category<select value={form.category} onChange={e => setForm({ ...form, category: e.target.value })}>{data.categories.map(c => <option key={c}>{c}</option>)}</select></label>
@@ -58,7 +58,7 @@ export default function Incidents({ user }) {
       </div>
       <label>What happened?<textarea rows="2" value={form.summary} onChange={e => setForm({ ...form, summary: e.target.value })} placeholder="At least 5 characters"/></label>
       <button className="button primary" disabled={form.summary.trim().length < 5} onClick={report}>Send report</button>
-    </section>
+    </section>}
 
     <section className="card-surface padded section-gap">
       <div className="subsection-title"><strong>{isOps ? 'Open incidents' : 'My open reports'}</strong><span>{open.length}</span></div>

@@ -4,14 +4,14 @@ import NotificationBell from './NotificationBell';
 
 // What each role sees. Students use the separate StudentApp, so they are not listed here.
 const navItems = [
-  { id: 'dashboard', label: 'Hub Dashboard', short: 'Hubs', icon: '▦', roles: ['Operator','Simulation Operator'] },
-  { id: 'charging', label: 'Smart Charging', short: 'Charging', icon: 'ϟ', roles: ['Operator'] },
-  { id: 'incidents', label: 'Incidents', short: 'Issues', icon: '!', roles: ['Operator'] },
-  { id: 'dispatch', label: 'Vehicle & User Redistribution', short: 'Dispatch', icon: '⇄', roles: ['Operator'] },
-  { id: 'simulation', label: 'What-if Simulation', short: 'Simulation', icon: '◌', roles: ['Operator','Simulation Operator'] },
-  { id: 'users', label: 'User Accounts', short: 'Users', icon: '☺', roles: ['Admin'] },
-  { id: 'access', label: 'Roles & Access', short: 'Access', icon: '⚿', roles: ['Admin'] },
-  { id: 'admin', label: 'Configuration', short: 'Config', icon: '⚙', roles: ['Admin'] }
+  { id: 'dashboard', label: 'Hub Dashboard', short: 'Hubs', icon: '🏢', roles: ['Operator','Simulation Operator'] },
+  { id: 'charging', label: 'Smart Charging', short: 'Charging', icon: '🔌', roles: ['Operator'] },
+  { id: 'incidents', label: 'Incidents', short: 'Issues', icon: '⚠️', roles: ['Operator'] },
+  { id: 'dispatch', label: 'Vehicle & User Redistribution', short: 'Dispatch', icon: '🚚', roles: ['Operator'] },
+  { id: 'simulation', label: 'What-if Simulation', short: 'Simulation', icon: '🧮', roles: ['Operator','Simulation Operator'] },
+  { id: 'users', label: 'User Accounts', short: 'Users', icon: '👥', roles: ['Admin'] },
+  { id: 'access', label: 'Roles & Access', short: 'Access', icon: '🔐', roles: ['Admin'] },
+  { id: 'admin', label: 'Configuration', short: 'Config', icon: '⚙️', roles: ['Admin'] }
 ];
 
 const ROLES = ['Student', 'Operator', 'Simulation Operator', 'Admin'];
