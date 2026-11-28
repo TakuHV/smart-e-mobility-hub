@@ -25,6 +25,9 @@ const defaults = {
     fieldMoveSeconds: 30,             // simulated time Field Staff need to move a vehicle
     returnLeadMinutes: 2,             // a booked shared vehicle leaves its charger this long before the pickup time
     stopCooldownMinutes: 15,          // a stopped automatic move is not planned again for this long
+    sharedMandatoryBelowPercent: 60,  // a shared vehicle below this always charges (it may take the charger of a vehicle charging only to use idle time)
+    sharedStopPercent: 90,            // a shared vehicle stops here when someone is waiting; otherwise it goes on to the target
+    sharedRestMinutes: 10,            // a shared vehicle at or above sharedMandatoryBelowPercent is not charged again this soon after it left a charger
     personalRequestsPerVehiclePerDay: 2,
     personalConnectWindowMinutes: 15,
     maxSessionMinutes: null,
@@ -50,7 +53,7 @@ const defaults = {
     tripDropMinutes: 20               // the drop is spread over this time
   },
   demoData: {
-    seedHubPowerLimitsKw: { 'hub-central': 3, 'hub-engineering': 3, 'hub-library': 3 },
+    seedHubPowerLimitsKw: { 'hub-central': 5, 'hub-engineering': 5, 'hub-library': 5 },
     seedChargerPowerKw: 1
   }
 };
@@ -78,7 +81,7 @@ function validate(c) {
   number('booking.pickupHoldMinutes', c.booking.pickupHoldMinutes, { min: 0, minExclusive: true, max: 240 });
   number('booking.minimumBatteryToBookPercent', c.booking.minimumBatteryToBookPercent, { min: 0, max: 100 });
   number('parking.holdingFreeReservePercent', c.parking.holdingFreeReservePercent, { min: 0, max: 100 });
-  for (const key of ['pickupNoticePercent', 'pickupGraceMinutes', 'moveAutoSendSeconds', 'fieldMoveSeconds', 'returnLeadMinutes', 'stopCooldownMinutes']) number(`charging.${key}`, c.charging[key], { min: 0, max: 1000 });
+  for (const key of ['pickupNoticePercent', 'pickupGraceMinutes', 'moveAutoSendSeconds', 'fieldMoveSeconds', 'returnLeadMinutes', 'stopCooldownMinutes', 'sharedMandatoryBelowPercent', 'sharedStopPercent', 'sharedRestMinutes']) number(`charging.${key}`, c.charging[key], { min: 0, max: 1000 });
   number('battery.tripDropPercent', c.battery.tripDropPercent, { min: 0, max: 100 });
   number('battery.tripDropMinutes', c.battery.tripDropMinutes, { min: 0, minExclusive: true, max: 600 });
   number('booking.maxTripHours', c.booking.maxTripHours, { min: 0, minExclusive: true, max: 72 });

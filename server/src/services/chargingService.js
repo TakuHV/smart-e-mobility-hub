@@ -91,6 +91,35 @@ export function chargeMinutesNeeded(battery, vehicleType) {
   return minutesToReach(config.charging.targetBatteryPercent, Number(battery), config.demoData.seedChargerPowerKw, vehicleType);
 }
 
+// Shown to the student before a personal request is confirmed: would it be class X (cannot be ready in time)?
+// It uses the same calculation as the Scheduler and suggests the earliest time that is realistic.
+export function previewPersonalCharging({ vehicleId, hubId, batteryLevel, nextRequiredUsageAt, startInMinutes = 0 }) {
+  const battery = Number(batteryLevel);
+  requireValue(Number.isFinite(battery) && battery >= 0 && battery <= 100, 400, 'Battery level must be a number from 0 to 100.');
+  const nextUse = Date.parse(nextRequiredUsageAt);
+  requireValue(Number.isFinite(nextUse), 400, 'Next Required Usage Time is not a valid date and time.');
+  const startIn = Number(startInMinutes) || 0;
+  const startMs = clockNow() + Math.max(0, startIn) * 60000;
+  const vehicle = vehicleId ? db.prepare('SELECT vehicle_type FROM vehicles WHERE id=?').get(vehicleId) : null;
+  const vehicleType = vehicle?.vehicle_type || 'Motorcycle';
+  const priority = calculatePriority({ battery_level: battery, next_required_usage_at: new Date(nextUse).toISOString(),
+    vehicle_type: vehicleType, registered_at: new Date(startMs).toISOString() }, startMs);
+  const needed = chargeMinutesNeeded(battery, vehicleType);
+  const earliest = Math.ceil((startMs + needed * 60000) / 60000) * 60000;
+  const hub = hubId ? db.prepare('SELECT * FROM hubs WHERE id=?').get(hubId) : null;
+  const sameDay = ms => new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Ho_Chi_Minh' }).format(new Date(ms));
+  const fitsToday = sameDay(earliest) === sameDay(startMs) && (!hub || inHubOperatingHours(hub, startMs, earliest));
+  return {
+    class: priority.cls,
+    willBeClassX: priority.cls === 'X',
+    chargeMinutesNeeded: Math.round(needed),
+    minutesToUse: Math.round((nextUse - startMs) / 60000),
+    slackMinutes: Math.round(priority.components.slack),
+    earliestUseAt: new Date(earliest).toISOString(),
+    earliestFitsToday: fitsToday
+  };
+}
+
 export function calculatePriority(request, nowMs = clockNow()) {
   const battery = Number(request.battery_level);
   const hasUsageTime = Boolean(request.next_required_usage_at);
@@ -140,13 +169,22 @@ function estimateQueueTimes(hubId, nowMs = clockNow()) {
   const ranked = rankQueue(hubId, nowMs);
   if (!ranked.length) return;
   const sessionMs = SCHED.estimatedSessionMinutes * 60000;
-  const rows = db.prepare(`SELECT c.*, r.charging_started_at, r.assigned_at
+  const rows = db.prepare(`SELECT c.*, r.charging_started_at, r.assigned_at, v.kind AS holder_kind,
+      (SELECT m.requested_at FROM move_vehicle_requests m WHERE m.charger_id=c.id AND m.direction='FROM_CHARGER'
+         AND m.status IN ('Requested','In Progress') ORDER BY m.requested_at DESC LIMIT 1) AS removal_requested_at
     FROM chargers c
     LEFT JOIN charging_requests r ON r.charger_id=c.id AND r.status IN ('Assigned','Charging')
+    LEFT JOIN vehicles v ON v.id=c.current_vehicle_id
     WHERE c.hub_id=? AND c.status IN ('Available','Assigned','Charging','Awaiting Removal')`).all(hubId);
   const chargers = rows.map(c => {
     let freeAt = nowMs;
-    if (c.status === 'Awaiting Removal') freeAt = nowMs + 5 * 60000;
+    if (c.status === 'Awaiting Removal') {
+      // A shared vehicle is moved by the system (countdown + move time); a personal vehicle waits for its owner (pickup grace).
+      const removalMs = c.holder_kind === 'shared'
+        ? (config.charging.moveAutoSendSeconds + config.charging.fieldMoveSeconds) * 1000
+        : config.charging.pickupGraceMinutes * 60000;
+      freeAt = (c.removal_requested_at ? Date.parse(c.removal_requested_at) : nowMs) + removalMs;
+    }
     else if (c.status === 'Charging' && c.charging_started_at) freeAt = Date.parse(c.charging_started_at) + sessionMs;
     else if (c.status === 'Assigned' && c.assigned_at) freeAt = Date.parse(c.assigned_at) + sessionMs;
     return { connectors: JSON.parse(c.connector_types_json), freeAt: Math.max(nowMs, freeAt) };
@@ -162,23 +200,67 @@ function estimateQueueTimes(hubId, nowMs = clockNow()) {
 }
 
 /*
- * Whenever a charger is free, idle shared vehicles are put on it, lowest battery first, until 100% (a shared vehicle that
- * is not at 100% is never left idle next to a free charger). Waiting personal requests are served first. Vehicles that are
- * booked are not touched. Shared chargers have no parking slot: the vehicle is moved to the charger by a Move Vehicle Request.
+ * Shared vehicles charge in three bands (charging.sharedMandatoryBelowPercent = 60, charging.sharedStopPercent = 90):
+ *  - below 60%: must charge. It is queued when a charger is free, and when all chargers are busy it takes the charger of a
+ *    shared vehicle that is only using idle charger time (preemptForMandatoryShared).
+ *  - 60% to 90%: uses idle chargers only (a free charger and nobody waiting), lowest battery first.
+ *  - 90% to 100%: same, but only after every vehicle below 90% has a charger. A vehicle that reaches 90% while someone
+ *    is waiting stops there; otherwise it simply goes on to 100% (no extra move).
+ * Once a vehicle is on a charger it stays there until it stops (90% or 100%), so every charge costs two moves only.
+ * After it leaves a charger, a vehicle at 60% or more rests for charging.sharedRestMinutes before it can be planned again.
+ * Booked vehicles are never touched. Shared chargers have no parking slot: the vehicle is moved by a Move Vehicle Request.
  */
+function idleSharedCandidates(hubId, nowMs, belowPercent, limit) {
+  const cooldown = new Date(nowMs - config.charging.stopCooldownMinutes * MIN).toISOString();
+  const rest = new Date(nowMs - config.charging.sharedRestMinutes * MIN).toISOString();
+  return db.prepare(`SELECT v.id, v.battery_level FROM vehicles v
+    JOIN parking_slots s ON s.current_vehicle_id=v.id AND s.slot_type='Shared' AND s.status='Occupied'
+    WHERE v.kind='shared' AND v.hub_id=? AND v.status IN ('Available','Needs Charging') AND v.battery_level<?
+      AND NOT EXISTS (SELECT 1 FROM charging_requests r WHERE r.vehicle_id=v.id AND r.status IN ('Queued','Assigned','Charging'))
+      AND NOT EXISTS (SELECT 1 FROM move_vehicle_requests m WHERE m.vehicle_id=v.id AND (m.status IN ('Requested','In Progress') OR (m.status='Cancelled' AND m.completed_at>?)))
+      AND (v.battery_level<? OR NOT EXISTS (SELECT 1 FROM move_vehicle_requests m WHERE m.vehicle_id=v.id AND m.direction='FROM_CHARGER'
+        AND m.status IN ('Done','Cancelled') AND m.completed_at>?))
+    ORDER BY v.battery_level, v.plate LIMIT ?`).all(hubId, belowPercent, cooldown, config.charging.sharedMandatoryBelowPercent, rest, limit);
+}
+
 function enqueueIdleShared(hub, nowMs) {
   const free = db.prepare(`SELECT COUNT(*) AS n FROM chargers WHERE hub_id=? AND status='Available'`).get(hub.id).n;
   const waiting = rankQueue(hub.id, nowMs).length;
   const room = free - waiting;
   if (room <= 0) return;
-  const cooldown = new Date(nowMs - config.charging.stopCooldownMinutes * MIN).toISOString();
-  const idle = db.prepare(`SELECT v.id FROM vehicles v
-    JOIN parking_slots s ON s.current_vehicle_id=v.id AND s.slot_type='Shared' AND s.status='Occupied'
-    WHERE v.kind='shared' AND v.hub_id=? AND v.status IN ('Available','Needs Charging') AND v.battery_level<100
-      AND NOT EXISTS (SELECT 1 FROM charging_requests r WHERE r.vehicle_id=v.id AND r.status IN ('Queued','Assigned','Charging'))
-      AND NOT EXISTS (SELECT 1 FROM move_vehicle_requests m WHERE m.vehicle_id=v.id AND (m.status IN ('Requested','In Progress') OR (m.status='Cancelled' AND m.completed_at>?)))
-    ORDER BY v.battery_level, v.plate LIMIT ?`).all(hub.id, cooldown, room);
-  for (const vehicle of idle) enqueueSharedVehicle(vehicle.id, hub.id);
+  // Lowest battery first, so the 90%-100% band only gets a charger when nothing below 90% is left.
+  for (const vehicle of idleSharedCandidates(hub.id, nowMs, 100, room)) enqueueSharedVehicle(vehicle.id, hub.id);
+}
+
+// Someone needs a charger at this Hub: a queued request, or an idle shared vehicle below the stop level.
+function someoneWaiting(hubId, nowMs) {
+  if (rankQueue(hubId, nowMs).length > 0) return true;
+  return idleSharedCandidates(hubId, nowMs, config.charging.sharedStopPercent, 1).length > 0;
+}
+
+// Shared sessions that only use idle charger time: started at 60% or more, or already past the stop level. Highest battery first.
+function opportunisticSessions(hubId) {
+  const mandatory = config.charging.sharedMandatoryBelowPercent;
+  return db.prepare(`SELECT r.*, v.plate, v.owner_id, v.kind, v.battery_level AS live_battery FROM charging_requests r
+    JOIN vehicles v ON v.id=r.vehicle_id
+    WHERE r.hub_id=? AND r.request_type='shared_automatic' AND r.status IN ('Assigned','Charging') AND v.status<>'Reserved'
+      AND (r.battery_level>=? OR v.battery_level>=?)
+    ORDER BY v.battery_level DESC, v.plate`).all(hubId, mandatory, config.charging.sharedStopPercent);
+}
+
+// A shared vehicle below 60% takes the charger of a vehicle that only uses idle time, when every charger is busy.
+function preemptForMandatoryShared(hub, nowMs) {
+  const mandatory = config.charging.sharedMandatoryBelowPercent;
+  const free = db.prepare(`SELECT COUNT(*) AS n FROM chargers WHERE hub_id=? AND status IN ('Available','Awaiting Removal')`).get(hub.id).n;
+  const queued = rankQueue(hub.id, nowMs);
+  const queuedLow = queued.filter(r => r.kind === 'shared' && Number(r.battery_level) < mandatory).length;
+  const idleLow = queuedLow > 0 ? [] : idleSharedCandidates(hub.id, nowMs, mandatory, 1);
+  if (queuedLow === 0 && idleLow.length === 0) return false;
+  if (free >= queued.length + idleLow.length) return false; // a charger is free or being emptied for it already
+  const victim = opportunisticSessions(hub.id)[0];
+  if (!victim) return false;
+  if (idleLow.length) enqueueSharedVehicle(idleLow[0].id, hub.id);
+  return stopSharedSession(victim, 'gives its charger to a shared vehicle below the mandatory level');
 }
 
 // Priority of a shared vehicle that is already on a charger: its live battery, its booking time (if any), no waiting time.
@@ -197,6 +279,11 @@ function sessionPriority(session, nowMs) {
 // A waiting request takes a charger from a running one only when it is clearly more important:
 // class H against class L, or the same class with a score higher by at least preemptMarginPoints (no ping-pong between near-equal vehicles).
 function outranksEnough(request, victim) {
+  // A class X request (cannot be ready in time any more) may still take the charger of a shared vehicle that nobody has
+  // scheduled (no Next Required Usage Time), because that does not make anyone late. It never displaces anything else.
+  if (request.tier === 2) {
+    return victim.tier === 1 && !victim.next_required_usage_at && request.score - victim.score >= SCHED.preemptMarginPoints;
+  }
   if (request.tier !== victim.tier) return request.tier < victim.tier;
   return request.score - victim.score >= SCHED.preemptMarginPoints;
 }
@@ -210,6 +297,9 @@ function preemptForPersonal(hub, nowMs) {
     const releasing = db.prepare(`SELECT connector_types_json FROM chargers WHERE hub_id=? AND status='Awaiting Removal'`).all(hub.id)
       .some(c => JSON.parse(c.connector_types_json).includes(connector));
     if (releasing) continue;
+    // A shared vehicle that is already at the stop level (90%) or above only uses idle time: it always gives way first.
+    const topUp = opportunisticSessions(hub.id).find(r => Number(r.live_battery) >= config.charging.sharedStopPercent);
+    if (topUp) return stopSharedSession(topUp, `stopped at ${Math.round(topUp.live_battery)}% for a personal request (${request.plate})`);
     const sessions = db.prepare(`SELECT r.*, v.plate, v.owner_id, v.kind, c.connector_types_json FROM charging_requests r
       JOIN vehicles v ON v.id=r.vehicle_id JOIN chargers c ON c.id=r.charger_id
       WHERE r.hub_id=? AND r.request_type='shared_automatic' AND r.status IN ('Assigned','Charging') AND v.status<>'Reserved'`).all(hub.id)
@@ -324,7 +414,7 @@ export function runScheduler(hubId = null, responsibleUser = 'system') {
     for (let pass = 0; pass < 2; pass++) {
       enqueueIdleShared(hub, nowMs);
       assignHub(hub);
-      if (pass === 0 && !preemptForPersonal(hub, nowMs)) break; // only a freed charger needs a second pass
+      if (pass === 0 && !preemptForPersonal(hub, nowMs) && !preemptForMandatoryShared(hub, nowMs)) break; // only a freed charger needs a second pass
     }
     estimateQueueTimes(hub.id, nowMs);
   }
@@ -667,6 +757,16 @@ export function stopAutoMove({ user, moveRequestId }) {
   return db.prepare('SELECT * FROM move_vehicle_requests WHERE id=?').get(moveRequestId);
 }
 
+// Resume a paused automatic Move Vehicle Request: the 15-second countdown starts again.
+export function resumeAutoMove({ user, moveRequestId }) {
+  requireValue(['Operator', 'Admin'].includes(user?.role), 403, 'Only Operations staff can resume an automatic move.');
+  const move = loadMove(moveRequestId);
+  requireValue(move.status === 'Requested' && !move.auto_send_at && !move.sent_at, 409, 'This request is not paused.');
+  db.prepare('UPDATE move_vehicle_requests SET auto_send_at=? WHERE id=?').run(autoSendAt(), moveRequestId);
+  auditChange('MoveVehicleRequest', moveRequestId, 'AUTO_SEND_RESUMED', {}, user.id);
+  return db.prepare('SELECT * FROM move_vehicle_requests WHERE id=?').get(moveRequestId);
+}
+
 export function cancelMoveRequest({ user, moveRequestId }) {
   requireValue(['Operator', 'Admin'].includes(user?.role), 403, 'Only Operations staff can cancel a Move Vehicle Request.');
   const move = db.prepare('SELECT * FROM move_vehicle_requests WHERE id=?').get(moveRequestId);
@@ -755,6 +855,9 @@ export function runMaintenance() {
  * Move Vehicle Requests with a countdown: when it ends the request is sent. Field Staff moves (shared vehicles, Holding) start
  * at once and finish after a short simulated time; a personal vehicle is moved by its owner, who is told to do it.
  */
+// Called every quarter second by the server, so a Move Vehicle Request is sent right when its countdown ends.
+export function runMoveRequestTimers(nowMs = clockNow()) { runMoveTimers(nowMs); }
+
 function runMoveTimers(nowMs) {
   const nowText = new Date(nowMs).toISOString();
   const due = db.prepare(`SELECT m.*, v.kind, v.owner_id, v.plate, c.code AS charger_code FROM move_vehicle_requests m
@@ -803,6 +906,14 @@ export function runChargingTimers(nowMs = clockNow()) {
     const elapsed = nowMs - Date.parse(session.charging_started_at);
     const battery = Math.min(100, Math.round(chargedBattery(session.start_battery ?? session.battery_level, session.power_kw, session.vehicle_type, elapsed)));
     // A big clock jump can take a vehicle past 90% and to the end in one step: the owner must still get the 90% message first.
+    // A shared vehicle stops at the stop level (90%) when someone needs a charger; otherwise it goes on to the target.
+    // Checked before the target, so a big clock jump does not take it past 90% while another vehicle waits.
+    const stopAt = config.charging.sharedStopPercent;
+    if (session.kind === 'shared' && battery >= stopAt && someoneWaiting(session.hub_id, nowMs)) {
+      const startedAt = Number(session.start_battery ?? session.battery_level);
+      finishCharging({ request: session, battery: startedAt >= stopAt ? battery : stopAt, actorId: 'system', reason: 'stop level reached, a charger is needed' });
+      continue;
+    }
     if (battery >= target) { sendPickupNotice(session, battery); finishCharging({ request: session, battery: target, actorId: 'system', reason: 'target reached' }); continue; }
     if (capMs !== null && elapsed >= capMs) { sendPickupNotice(session, battery); finishCharging({ request: session, battery, actorId: 'system', reason: 'maximum session length' }); continue; }
     if (battery !== session.vehicle_battery) {
@@ -827,12 +938,15 @@ export function runChargingTimers(nowMs = clockNow()) {
     }
   }
 
-  const removals = db.prepare(`SELECT m.requested_at, m.id AS move_id, m.destination, v.plate, v.owner_id, v.kind, r.id AS request_id, c.code AS charger_code, c.hub_id AS charger_hub
+  const removals = db.prepare(`SELECT m.requested_at, m.status AS move_status, m.auto_send_at, m.id AS move_id, m.destination, v.plate, v.owner_id, v.kind, r.id AS request_id, c.code AS charger_code, c.hub_id AS charger_hub
     FROM move_vehicle_requests m JOIN vehicles v ON v.id=m.vehicle_id
     JOIN charging_requests r ON r.id=m.charging_request_id JOIN chargers c ON c.id=m.charger_id
     WHERE m.direction='FROM_CHARGER' AND m.status IN ('Requested','In Progress') AND r.overstay_flagged_at IS NULL`).all();
   for (const m of removals) {
     if (nowMs - Date.parse(m.requested_at) < graceMs) continue;
+    // Field Staff (simulated) move a shared vehicle by themselves: it is overdue only when an Operator paused that request.
+    // After a big clock jump the move is still about to be sent, and must not be reported as overdue.
+    if (m.kind === 'shared' && (m.move_status === 'In Progress' || m.auto_send_at)) continue;
     db.prepare('UPDATE charging_requests SET overstay_flagged_at=? WHERE id=? AND overstay_flagged_at IS NULL').run(nowText, m.request_id);
     auditChange('ChargingRequest', m.request_id, 'CHARGER_REMOVAL_OVERDUE', { moveRequestId: m.move_id }, 'system');
     const text = `${m.plate} is still at ${m.charger_code}, ${config.charging.pickupGraceMinutes} minutes after charging ended.`;

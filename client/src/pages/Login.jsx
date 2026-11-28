@@ -37,7 +37,7 @@ export default function Login({ onLogin }) {
           <svg viewBox="0 0 48 48" width="54" height="54"><circle cx="24" cy="24" r="19" fill="none" stroke="rgba(255,255,255,.2)" strokeWidth="5"/><circle cx="24" cy="24" r="19" fill="none" stroke="#7ee7d3" strokeWidth="5" strokeLinecap="round" strokeDasharray="98 120" transform="rotate(-90 24 24)"/></svg>
           <div><b>82%</b><small>Charging · CH-1</small></div>
         </div>
-        <div className="glass art-trip"><span className="art-emoji">🛵</span><div><b>Central Hub → Library Hub</b><small>Trip in progress</small></div></div>
+        <div className="glass art-trip"><span className="art-emoji">🛵</span><div><b>Hub A → Hub C</b><small>Trip in progress</small></div></div>
         <div className="glass art-slot"><span className="art-check">✓</span><div><b>Parking spot reserved</b><small>Personal slot P-04</small></div></div>
       </div>
     </div>

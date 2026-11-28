@@ -7,7 +7,7 @@ import { config, resetConfig } from '../src/config.js';
 import { addUser, makeHub, addSlot, addCharger, addVehicle, row, notificationKinds, later } from './helpers.js';
 import { createBooking, pickupBooking, returnBooking, createPersonalVehicle } from '../src/services/vehicleService.js';
 import { createReservation } from '../src/services/parkingService.js';
-import { createPersonalChargingRequest, connectPersonalVehicle, startMoveRequest, completeMoveRequest, calculatePriority, rankQueue, runScheduler, stopAutoMove } from '../src/services/chargingService.js';
+import { createPersonalChargingRequest, connectPersonalVehicle, startMoveRequest, completeMoveRequest, calculatePriority, rankQueue, runScheduler, stopAutoMove, resumeAutoMove, previewPersonalCharging } from '../src/services/chargingService.js';
 import { runTimers, runCycle } from '../src/services/timerService.js';
 import { saveSettings, resetSettings, loadSavedSettings } from '../src/services/settingsService.js';
 import { adminOverview, updateHub, addSlots, removeSlot, addCharger as adminAddCharger, updateCharger, removeCharger,
@@ -511,11 +511,12 @@ test('Demo reset: data returns to the sample state and accounts return to the fi
   assert.throws(() => db.prepare(`DELETE FROM simulation_runs`).run(), /BR-33/); // the protection is back
   assert.ok(db.prepare(`SELECT COUNT(*) AS n FROM audit_logs WHERE action='DEMO_DATA_RESET'`).get().n >= 1);
 
-  // accounts: only the five defaults remain (Demo has four roles), all Active
+  // accounts: only the defaults and the five seeded Students remain (Demo has four roles), all Active
   assert.equal(db.prepare('SELECT id FROM users WHERE id=?').get(extra.id), undefined);
   const names = db.prepare('SELECT full_name, role, status FROM users ORDER BY full_name, role').all();
-  assert.equal(names.length, 8);
-  assert.ok(names.every(u => u.status === 'Active' && (u.full_name === u.role || u.full_name === 'Demo')));
+  assert.equal(names.length, 13);
+  assert.ok(names.every(u => u.status === 'Active' && (u.full_name === u.role || u.full_name === 'Demo' || /^student[1-5]$/.test(u.full_name))));
+  assert.equal(db.prepare(`SELECT COUNT(*) AS n FROM parking_reservations WHERE status='In Progress'`).get().n, 5);
   assert.equal(names.filter(u => u.full_name === 'Demo').length, 4);
 
   // the system works again after the reset
@@ -589,6 +590,11 @@ test('An Operator can stop the countdown of an automatic move', () => {
   assert.equal(after.status, 'Requested');
   assert.equal(after.sent_at, null);
   fail(() => stopAutoMove({ user: addUser('Student'), moveRequestId: move.id }), 403);
+  // Resume: the countdown starts again and the request is sent when it ends.
+  resumeAutoMove({ user: operator, moveRequestId: move.id });
+  assert.ok(row('SELECT auto_send_at FROM move_vehicle_requests WHERE id=?', move.id).auto_send_at);
+  jump(1); runTimers();
+  assert.notEqual(row('SELECT sent_at FROM move_vehicle_requests WHERE id=?', move.id).sent_at, null);
 });
 
 test('A personal request with a higher priority takes the charger of the lowest-priority shared vehicle', () => {
@@ -724,7 +730,7 @@ test('Priority: a personal request that is only slightly ahead does not displace
   assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, shared.id).status, 'Charging');
 });
 
-test('Priority: a shared vehicle at 90% or more is never displaced; the next lowest one is', () => {
+test('Priority: a shared vehicle at 90% or more only uses idle time, so it gives way first; the 60% vehicle keeps charging', () => {
   const student = addUser('Student');
   const hub = makeHub();
   for (let i = 0; i < 6; i++) addSlot(hub, 'Holding');
@@ -736,24 +742,67 @@ test('Priority: a shared vehicle at 90% or more is never displaced; the next low
   assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, middle.id).status, 'Charging');
   const personal = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 10 });
   createPersonalChargingRequest({ user: student, vehicleId: personal.id, hubId: hub, batteryLevel: 10, nextRequiredUsageAt: later(2.8) });
-  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, nearlyFull.id).status, 'Charging', 'the 92% vehicle keeps charging');
-  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, middle.id).status, 'Completed', 'the 60% vehicle gave way');
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, nearlyFull.id).status, 'Completed', 'the 92% vehicle stops');
+  assert.ok(row('SELECT battery_level FROM vehicles WHERE id=?', nearlyFull.id).battery_level >= 92, 'it keeps the battery it has');
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, middle.id).status, 'Charging', 'the 60% vehicle keeps charging');
   assert.ok(c1 && c2);
 });
 
-test('Priority: when every charger holds a vehicle at 90% or more, the personal request waits and gets the first free charger', () => {
-  const student = addUser('Student');
+test('Shared bands: a vehicle stops at 90% when another one needs the charger, and goes on to 100% when nobody waits', () => {
   const hub = makeHub();
-  for (let i = 0; i < 5; i++) addSlot(hub, 'Holding');
-  const charger = addCharger(hub);
-  const nearlyFull = sharedAtHub(hub, 95);
+  addCharger(hub);
+  const first = sharedAtHub(hub, 70);
   runScheduler(hub); finishMoves();
-  const personal = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 10 });
-  const request = createPersonalChargingRequest({ user: student, vehicleId: personal.id, hubId: hub, batteryLevel: 10, nextRequiredUsageAt: later(2.8) });
-  assert.equal(request.status, 'Queued');
-  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, nearlyFull.id).status, 'Charging');
-  jump(30); runTimers(); finishMoves(); runScheduler(hub); finishMoves();   // the shared vehicle reaches 100% and leaves
-  assert.equal(row('SELECT charger_id FROM charging_requests WHERE id=?', request.id).charger_id, charger);
+  const second = sharedAtHub(hub, 80);                        // arrives later: it waits for the only charger
+  jump(12); runTimers();                                       // 7.2 kW: about 3.4% per minute, the first vehicle passes 90%
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=? ORDER BY created_at`, first.id).status, 'Completed');
+  assert.equal(row('SELECT battery_level FROM vehicles WHERE id=?', first.id).battery_level, 90, 'stopped at 90% for the waiting vehicle');
+  finishMoves(); runScheduler(hub); finishMoves();
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, second.id).status, 'Charging');
+  jump(4); runTimers();                                        // about 94%: the first vehicle is at 90%, so nobody waits
+  assert.ok(row('SELECT battery_level FROM vehicles WHERE id=?', second.id).battery_level > 90);
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, second.id).status, 'Charging', 'past 90% it goes on');
+  jump(3); runTimers();
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, second.id).status, 'Completed');
+  assert.equal(row('SELECT battery_level FROM vehicles WHERE id=?', second.id).battery_level, 100);
+});
+
+test('Shared bands: a vehicle below 60% takes the charger of a vehicle that only uses idle time', () => {
+  const hub = makeHub();
+  addCharger(hub);
+  const topUp = sharedAtHub(hub, 75);
+  runScheduler(hub); finishMoves();
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, topUp.id).status, 'Charging');
+  const low = sharedAtHub(hub, 30);
+  runScheduler(hub);
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, topUp.id).status, 'Completed', 'the 75% vehicle gives way');
+  finishMoves(); runScheduler(hub); finishMoves();
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=? ORDER BY created_at DESC`, low.id).status, 'Charging');
+});
+
+test('Shared bands: a vehicle below 60% does not take the charger of another mandatory vehicle', () => {
+  const hub = makeHub();
+  addCharger(hub);
+  const first = sharedAtHub(hub, 40);
+  runScheduler(hub); finishMoves();
+  sharedAtHub(hub, 20);
+  runScheduler(hub);
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, first.id).status, 'Charging');
+});
+
+test('Shared bands: a vehicle at 60% or more rests 10 minutes after it left a charger; the 90-100% band waits for the lower ones', () => {
+  const hub = makeHub();
+  addCharger(hub);
+  const v = sharedAtHub(hub, 70);
+  runScheduler(hub); finishMoves();
+  const other = sharedAtHub(hub, 85);
+  jump(12); runTimers(); finishMoves();                       // v stops at 90% for the waiting vehicle and is moved away
+  runScheduler(hub); finishMoves();
+  assert.equal(row(`SELECT status FROM charging_requests WHERE vehicle_id=?`, other.id).status, 'Charging');
+  jump(5); runTimers(); finishMoves(); runScheduler(hub);     // the other one reached 100% (about 4.4 min); v still rests
+  assert.equal(row(`SELECT COUNT(*) AS n FROM charging_requests WHERE vehicle_id=? AND status IN ('Queued','Assigned','Charging')`, v.id).n, 0);
+  jump(4); runTimers(); runScheduler(hub);                     // rest is over and the charger is free: v tops up to 100%
+  assert.equal(row(`SELECT COUNT(*) AS n FROM charging_requests WHERE vehicle_id=? AND status IN ('Queued','Assigned','Charging')`, v.id).n, 1);
 });
 
 test('Priority: a vehicle that cannot be saved (class X) is ranked behind the others and does not displace anyone', () => {
@@ -788,6 +837,46 @@ test('Priority: a class X vehicle is still charged when nobody else needs the ch
   assert.equal(calculatePriority({ battery_level: 30, vehicle_type: 'Motorcycle', next_required_usage_at: later(5 / 60), registered_at: nowIso() }).cls, 'X');
   assert.equal(request.status, 'Assigned');
   assert.equal(row('SELECT charger_id FROM charging_requests WHERE id=?', request.id).charger_id, charger);
+});
+
+test('Class X: a personal vehicle that cannot be ready in time still takes the charger of a shared vehicle nobody has scheduled', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  for (let i = 0; i < 6; i++) addSlot(hub, 'Holding');
+  addCharger(hub);
+  const shared = sharedAtHub(hub, 50);
+  runScheduler(hub);
+  const sharedRequest = row('SELECT * FROM charging_requests WHERE vehicle_id=?', shared.id);
+  assert.ok(['Assigned', 'Charging'].includes(sharedRequest.status));
+  const bike = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 15 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: bike.id, hubId: hub, batteryLevel: 15, nextRequiredUsageAt: later(1) }); // needs 178 min, has 60: class X
+  assert.equal(calculatePriority({ battery_level: 15, vehicle_type: 'Motorcycle', next_required_usage_at: later(1), registered_at: nowIso() }).cls, 'X');
+  assert.equal(request.status, 'Assigned', 'the unscheduled shared vehicle gives way');
+  assert.equal(row('SELECT status FROM charging_requests WHERE id=?', sharedRequest.id).status, 'Cancelled');
+});
+
+test('Class X: a shared vehicle that has a Next Required Usage Time is not displaced', () => {
+  const student = addUser('Student');
+  const hub = makeHub();
+  for (let i = 0; i < 6; i++) addSlot(hub, 'Holding');
+  addCharger(hub);
+  const shared = sharedAtHub(hub, 50);
+  runScheduler(hub);
+  db.prepare('UPDATE charging_requests SET next_required_usage_at=? WHERE vehicle_id=?').run(later(6), shared.id);
+  const bike = addVehicle({ kind: 'personal', hubId: hub, ownerId: student.id, battery: 15 });
+  const request = createPersonalChargingRequest({ user: student, vehicleId: bike.id, hubId: hub, batteryLevel: 15, nextRequiredUsageAt: later(1) });
+  assert.equal(request.status, 'Queued');
+});
+
+test('Preview before joining: tells at once whether the request would be class X and suggests a later time', () => {
+  const hub = makeHub();
+  const tight = previewPersonalCharging({ hubId: hub, batteryLevel: 15, nextRequiredUsageAt: later(1) });
+  assert.equal(tight.willBeClassX, true);
+  assert.ok(tight.chargeMinutesNeeded >= 170 && tight.chargeMinutesNeeded <= 185);
+  assert.ok(Date.parse(tight.earliestUseAt) >= clockNow() + tight.chargeMinutesNeeded * 60000 - 60000);
+  const roomy = previewPersonalCharging({ hubId: hub, batteryLevel: 15, nextRequiredUsageAt: later(5) });
+  assert.equal(roomy.willBeClassX, false);
+  fail(() => previewPersonalCharging({ hubId: hub, batteryLevel: 150, nextRequiredUsageAt: later(1) }), 400);
 });
 
 /* ---------- Motorcycles only, pickup message on a clock jump, parking limit ---------- */

@@ -37,8 +37,8 @@ export function resetDemoData({ user }) {
   resetClock();
   const seeded = seedDatabase();
   ensureDemoAccounts();
-  // Accounts: keep only the defaults ("Admin" with role Admin, ..., and "Demo" with any role).
-  const removed = db.prepare(`DELETE FROM users WHERE NOT (full_name = role COLLATE NOCASE OR full_name = 'Demo' COLLATE NOCASE)`).run().changes;
+  // Accounts: keep only the defaults ("Admin" with role Admin, ..., "Demo" with any role) and the five seeded Students (student1 ... student5).
+  const removed = db.prepare(`DELETE FROM users WHERE NOT (full_name = role COLLATE NOCASE OR full_name = 'Demo' COLLATE NOCASE OR (role = 'Student' AND full_name GLOB 'student[0-9]'))`).run().changes;
   db.prepare(`UPDATE users SET status='Active'`).run();
   auditChange('Demo', 'data', 'DEMO_DATA_RESET', { tablesCleared: tables.length }, user.id);
   return { reset: true, seeded: seeded.seeded !== false, tablesCleared: tables.length, accountsRemoved: Number(removed) };

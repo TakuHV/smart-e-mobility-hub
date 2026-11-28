@@ -29,6 +29,15 @@ export async function refreshClock() {
   } catch { /* the offline banner covers an unreachable server */ }
 }
 
+export async function skipDemoSeconds() {
+  const data = await api('/clock/demo-skip', { method: 'POST', body: {} });
+  state = { ...state, ...data, now: Date.parse(data.now), loaded: true };
+  syncedAt = Date.now();
+  emit();
+  window.dispatchEvent(new Event('smh:clock-changed'));
+  return data;
+}
+
 export async function controlClock(body) {
   const data = await api('/clock', { method: 'POST', body });
   state = { ...state, ...data, now: Date.parse(data.now), loaded: true };

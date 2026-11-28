@@ -21,8 +21,13 @@ function slotHasConflict(slotId, startIso, endIso) {
 
 // UC-008 step 4: the compatible Personal slots that are available for the period.
 // startAt/endAt/vehicleType are optional; without them the list is the plain slot list.
-export function listSlots({ hubId, slotType, startAt, endAt, vehicleType } = {}) {
-  let sql = `SELECT s.*, h.name AS hub_name FROM parking_slots s JOIN hubs h ON h.id=s.hub_id WHERE 1=1`;
+// withOccupant: Operators also get the plate and owner of the vehicle in a slot. Never pass it for a Student (BR-07).
+export function listSlots({ hubId, slotType, startAt, endAt, vehicleType, withOccupant = false } = {}) {
+  let sql = withOccupant
+    ? `SELECT s.*, h.name AS hub_name, v.plate AS vehicle_plate, v.kind AS vehicle_kind, u.full_name AS owner_name
+       FROM parking_slots s JOIN hubs h ON h.id=s.hub_id
+       LEFT JOIN vehicles v ON v.id=s.current_vehicle_id LEFT JOIN users u ON u.id=v.owner_id WHERE 1=1`
+    : `SELECT s.*, h.name AS hub_name FROM parking_slots s JOIN hubs h ON h.id=s.hub_id WHERE 1=1`;
   const params = [];
   if (hubId) { sql += ' AND s.hub_id=?'; params.push(hubId); }
   if (slotType) { sql += ' AND s.slot_type=?'; params.push(slotType); }

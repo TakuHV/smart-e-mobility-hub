@@ -6,6 +6,8 @@ import { recentSchedulerRuns, isSimulatedSensorFeedEnabled } from '../services/c
 import { HttpError, auditChange } from '../services/commonService.js';
 import { config } from '../config.js';
 
+const DEMO_SKIP_SECONDS = 45;
+
 // The limits the screens count against (all read from configuration.json).
 const limits = () => ({
   pickupHoldMinutes: config.booking.pickupHoldMinutes,
@@ -51,6 +53,14 @@ router.post('/', requireRoles('Operator', 'Admin'), asyncRoute((req, res) => {
   if (jumpMinutes !== undefined) jump(jumpMinutes);
   auditChange('DemoClock', 'clock', 'DEMO_CLOCK_CHANGED', { speed, paused, jumpMinutes }, req.user.id);
   try { runCycle(); } catch (error) { console.error('Catch-up cycle failed after a clock change:', error); } // events due after a skip happen at once
+  res.json(snapshot());
+}));
+
+// Demo only: any signed-in user (a Student during a demo) can move the demo clock ahead by 45 seconds.
+router.post('/demo-skip', asyncRoute((req, res) => {
+  jump(DEMO_SKIP_SECONDS / 60);
+  auditChange('DemoClock', 'clock', 'DEMO_CLOCK_SKIPPED', { seconds: DEMO_SKIP_SECONDS }, req.user.id);
+  try { runCycle(); } catch (error) { console.error('Catch-up cycle failed after a clock change:', error); }
   res.json(snapshot());
 }));
 
