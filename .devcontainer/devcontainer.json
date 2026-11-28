@@ -1,0 +1,14 @@
+{
+  "name": "Smart E-Mobility Hub",
+  "image": "mcr.microsoft.com/devcontainers/javascript-node:22",
+  "containerEnv": {
+    "VITE_API_URL": "/api"
+  },
+  "postCreateCommand": "npm install",
+  "postAttachCommand": "npm run dev",
+  "forwardPorts": [5173, 4000],
+  "portsAttributes": {
+    "5173": { "label": "Web (Vite)", "onAutoForward": "openBrowser" },
+    "4000": { "label": "API", "onAutoForward": "silent" }
+  }
+}

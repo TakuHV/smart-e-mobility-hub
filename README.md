@@ -1,5 +1,9 @@
 # Smart E-Mobility Hub — MVP
 
+[![Open in GitHub Codespaces](https://github.com/codespaces/badge.svg)](https://codespaces.new/TakuHV/smart-e-mobility-hub)
+
+> **Run in the browser, no clone needed:** click the button above, wait 1–3 minutes while dependencies install, and the web app opens on port 5173. Log in with one of the demo accounts listed in this README.
+
 A student-level MVP built with **React + JavaScript + Node.js + Express + SQLite**. The MVP is based on the agreed requirements baseline and focuses on **13 selected use cases** that demonstrate the main student, resource-management, operations, charging and simulation workflows. It does not attempt to implement all 25 use cases in Submission #1.
 
 ## MVP scope
