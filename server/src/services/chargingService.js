@@ -120,7 +120,8 @@ export function previewPersonalCharging({ vehicleId, hubId, batteryLevel, nextRe
   };
 }
 
-export function calculatePriority(request, nowMs = clockNow()) {
+// `weights` defaults to the configured Scheduler weights; the What-if Simulation passes other weights to compare them (UC-023).
+export function calculatePriority(request, nowMs = clockNow(), weights = SCHED.weights) {
   const battery = Number(request.battery_level);
   const hasUsageTime = Boolean(request.next_required_usage_at);
   const minutesToUse = hasUsageTime ? (Date.parse(request.next_required_usage_at) - nowMs) / 60000 : null;
@@ -132,7 +133,7 @@ export function calculatePriority(request, nowMs = clockNow()) {
     ? 100 * Math.min(1, Math.max(0, 1 - Math.max(0, slack) / SCHED.urgencyHorizonMinutes))
     : 0;
   const waiting = Math.min(100, minutesWaited / SCHED.waitingDivisorMinutes);
-  const w = SCHED.weights;
+  const w = weights;
   const score = w.need * need + w.urgency * urgency + w.waiting * waiting;
 
   const lowBattery = battery < SCHED.classH.batteryBelowPercent;
@@ -146,7 +147,7 @@ export function calculatePriority(request, nowMs = clockNow()) {
 
 // Class H first, then by score (high to low).
 // OD-2/OD-1: the last key is a deterministic TECHNICAL tie-break (vehicle id), not a business rule and not arrival order.
-function compareRanked(a, b) {
+export function compareRanked(a, b) {
   if (a.tier !== b.tier) return a.tier - b.tier;
   if (b.score !== a.score) return b.score - a.score;
   return String(a.vehicle_id).localeCompare(String(b.vehicle_id));

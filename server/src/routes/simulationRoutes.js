@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { asyncRoute, requireLogin, requireRoles, pick } from '../middleware/requestContext.js';
-import { listSimulationRuns, getSimulationRun, runSimulation, compareSimulationRuns,
+import { listSimulationRuns, getSimulationRun, runSimulation, compareSimulationRuns, getHubBaselineContext,
   applyRecommendation, declineRecommendation, listHandoffs, completeHandoff } from '../services/simulationService.js';
 import { HttpError } from '../services/commonService.js';
 
@@ -12,6 +12,9 @@ const canRead = requireRoles('Simulation Operator', 'Operator', 'Admin');
 const router = Router();
 router.use(requireLogin);
 
+// Current state of one Hub for the scenario form (no vehicle plates, nothing stored).
+router.get('/baseline/:hubId', canRead, asyncRoute((req, res) => res.json({ baseline: getHubBaselineContext(req.params.hubId) })));
+
 router.get('/runs', canRead, asyncRoute((_req, res) => res.json({ runs: listSimulationRuns() })));
 router.get('/runs/:runId', canRead, asyncRoute((req, res) => {
   const run = getSimulationRun(req.params.runId);
@@ -22,7 +25,8 @@ router.get('/runs/:runId', canRead, asyncRoute((req, res) => {
 router.post('/runs', asyncRoute((req, res) => res.status(201).json({
   run: runSimulation({
     ...pick(req.body, ['hubId', 'scenarioType', 'demandDelta', 'chargerOutageCount', 'slotType',
-      'powerLimitKw', 'estimatedSessionMinutes', 'label']),
+      'powerLimitKw', 'label', 'startOccupancyPercent', 'outageChargerIds',
+      'weights', 'urgentSharePercent', 'demandSeed']),
     user: req.user
   })
 })));

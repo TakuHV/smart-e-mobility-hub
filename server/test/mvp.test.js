@@ -7,7 +7,7 @@ import { createBooking, pickupBooking, returnBooking } from '../src/services/veh
 import { createReservation, cancelReservation } from '../src/services/parkingService.js';
 import { createPersonalChargingRequest, connectPersonalVehicle, completeCharging,
   runScheduler, startMoveRequest, completeMoveRequest, enqueueSharedVehicle } from '../src/services/chargingService.js';
-import { runSimulation, compareSimulationRuns, applyRecommendation, completeHandoff } from '../src/services/simulationService.js';
+import { runSimulation, compareSimulationRuns, applyRecommendation, completeHandoff, getHubBaselineContext } from '../src/services/simulationService.js';
 
 seedDatabase();
 const addUser = (role) => {
@@ -91,10 +91,12 @@ test('UC-023/024/025: simulation snapshots stay separate from live data and reco
   const simulationOperator=addUser('Simulation Operator');
   const operator=addUser('Operator');
   const before=db.prepare("SELECT id,status,battery_level FROM vehicles WHERE hub_id='hub-central' ORDER BY id").all();
-  const run1=runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'parking_surge',demandDelta:2,chargerOutageCount:1});
-  const run2=runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'capacity_pressure',demandDelta:3,chargerOutageCount:1});
+  // A Hub that starts 90% full gets a redirect recommendation; a light surge needs none.
+  const run1=runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'capacity_pressure',demandDelta:1,startOccupancyPercent:90});
+  const run2=runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'parking_surge',demandDelta:3});
   assert.equal(run1.label,'Simulated');
   assert.equal(run1.recommendations[0].status,'Proposed');
+  assert.equal(run1.recommendations[0].type,'REDIRECT_USERS');
   const comparison=compareSimulationRuns({user:simulationOperator,runIds:[run1.id,run2.id]});
   assert.equal(comparison.runs.length,2);
   const after=db.prepare("SELECT id,status,battery_level FROM vehicles WHERE hub_id='hub-central' ORDER BY id").all();
@@ -106,6 +108,68 @@ test('UC-023/024/025: simulation snapshots stay separate from live data and reco
   assert.equal(db.prepare('SELECT status FROM recommendations WHERE id=?').get(run1.recommendations[0].id).status,'Applied');
 });
 
+
+test('UC-023 what-if inputs: starting occupancy, chosen chargers, Power Limit only for outages, form context', () => {
+  const simulationOperator=addUser('Simulation Operator');
+  const surge=runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'parking_surge',demandDelta:1});
+  const pressure=runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'capacity_pressure',demandDelta:1,startOccupancyPercent:90});
+  assert.ok(pressure.results.projectedPersonalSlotOccupancyPercent>surge.results.projectedPersonalSlotOccupancyPercent,
+    'capacity_pressure must start from a fuller Hub than parking_surge');
+  assert.equal(pressure.results.currentPersonalSlotOccupancyPercent,surge.results.currentPersonalSlotOccupancyPercent,'the real baseline is unchanged');
+
+  const chargers=db.prepare("SELECT id,code,status FROM chargers WHERE hub_id='hub-central' AND status NOT IN ('Out of Service','Status Unknown','Connection Lost') ORDER BY code").all();
+  const chosen=chargers.slice(-2).map(c=>c.id);
+  const outage=runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'charger_outage',outageChargerIds:chosen,powerLimitKw:2});
+  assert.deepEqual(outage.parameters.outageChargerIds,chosen);
+  assert.equal(outage.parameters.chargerOutageCount,2);
+  assert.equal(outage.results.hubPowerLimitKw,2);
+  assert.ok(outage.results.projectedConcurrentChargingCapacity<=2);
+  assert.throws(()=>runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'charger_outage',outageChargerIds:['not-a-charger']}),
+    err=>err.status===400);
+  assert.throws(()=>runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'charging_demand',demandDelta:2,powerLimitKw:3}),
+    err=>err.status===400,'the Hub Power Limit is a what-if input of the outage scenario only');
+
+  const busy=runSimulation({user:simulationOperator,hubId:'hub-central',scenarioType:'charging_demand',demandDelta:50});
+  assert.equal(busy.recommendations[0].type,'ADJUST_CHARGING');
+  assert.ok(busy.results.projectedLongestWaitMinutes>busy.results.currentLongestWaitMinutes);
+
+  const context=getHubBaselineContext('hub-central');
+  assert.equal(context.hub.id,'hub-central');
+  assert.ok(context.chargers.length>0 && context.slots.Personal.total>0);
+  assert.ok(!JSON.stringify(context).includes('"plate"'),'the form context carries no vehicle plates');
+});
+
+test('UC-023/024 charging weights: the same simulated demand ranked with other Scheduler weights', () => {
+  const simulationOperator=addUser('Simulation Operator');
+  // A Hub of its own (5 chargers of 1 kW, 5 kW limit, empty queue) so the result does not depend on other tests.
+  const hubId=makeId('test-hub-weights');
+  const now=nowIso();
+  db.prepare(`INSERT INTO hubs (id,code,name,location,open_time,close_time,power_limit_kw,status,sensor_updated_at)
+    VALUES (?,?,?,?,'00:00','23:59',5,'Open',?)`).run(hubId,`W-${hubId.slice(-8)}`,'Weights Test Hub','Automated Test',now);
+  for (let i=1;i<=5;i++) db.prepare(`INSERT INTO chargers (id,hub_id,code,connector_types_json,power_kw,status,updated_at)
+    VALUES (?,?,?,?,1,'Available',?)`).run(`${hubId}-CH${i}`,hubId,`CH-${i}`,JSON.stringify(['Type2']),now);
+
+  const demand={user:simulationOperator,hubId,scenarioType:'charging_demand',demandDelta:15,urgentSharePercent:40,demandSeed:7};
+  const configured=runSimulation(demand);
+  const deadlineFirst=runSimulation({...demand,weights:{need:0.1,urgency:0.8,waiting:0.1}});
+  assert.equal(configured.results.usesConfiguredWeights,true);
+  assert.equal(deadlineFirst.results.usesConfiguredWeights,false);
+  assert.equal(deadlineFirst.results.projectedChargingQueue,configured.results.projectedChargingQueue,'same demand in both runs');
+  assert.deepEqual(deadlineFirst.results.chargingTimeline.map(t=>t.id).sort(),configured.results.chargingTimeline.map(t=>t.id).sort());
+  // The run with other weights also reports the configured weights on the same demand: that equals the first run.
+  assert.equal(deadlineFirst.results.configuredWeightsLateVehicles,configured.results.projectedLateVehicles);
+  assert.equal(configured.results.projectedVehiclesWithUsageTime,15);
+  assert.ok(configured.results.projectedLateVehicles>0,'15 requests on 5 chargers: some are late');
+  // The first five start at once, the others wait for a free charger.
+  assert.equal(configured.results.chargingTimeline.filter(t=>t.waitMinutes===0).length,5);
+  if (deadlineFirst.results.projectedLateVehicles<configured.results.projectedLateVehicles) {
+    assert.ok(deadlineFirst.recommendations.some(r=>r.payload.kind==='scheduler_weights'));
+  }
+  assert.throws(()=>runSimulation({...demand,weights:{need:0.5,urgency:0.5,waiting:0.5}}),err=>err.status===400,'weights must add up to 100%');
+  assert.throws(()=>runSimulation({...demand,weights:{need:-0.1,urgency:0.6,waiting:0.5}}),err=>err.status===400);
+  const compared=compareSimulationRuns({user:simulationOperator,runIds:[configured.id,deadlineFirst.id]});
+  assert.ok(compared.metrics.some(m=>m.metric==='projectedLateVehicles'));
+});
 
 test('Shared vehicle Move Vehicle Request cycle: TO_CHARGER and FROM_CHARGER keep charger occupied until Done', () => {
   const operator = addUser('Operator');
